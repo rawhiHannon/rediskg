@@ -80,29 +80,45 @@ func (p *Pipeline) Query(question string) (*models.QueryResult, error) {
 }
 
 // findRelevantEntities searches for entity names in the graph that match the question.
+// Uses a two-phase approach: substring matching first, then vector similarity as fallback.
 func (p *Pipeline) findRelevantEntities(question string) []string {
 	q := strings.ToLower(question)
 
-	// Get all node names and find matches
+	// Get all node names
 	nodes, err := p.store.GetAllNodes()
 	if err != nil {
 		log.Printf("Warning: failed to get nodes for query: %v", err)
 		return nil
 	}
 
+	// Phase 1: Exact substring matching (fast, precise)
 	var matches []string
 	for _, node := range nodes {
 		name, ok := node["col_0"].(string)
 		if !ok || name == "" {
 			continue
 		}
-		// Check if the entity name appears in the question
 		if strings.Contains(q, strings.ToLower(name)) {
 			matches = append(matches, name)
 		}
 	}
 
-	// If no substring match, try fuzzy: check if any word in the question matches
+	// Phase 2: If no substring matches, use embedding similarity
+	if len(matches) == 0 {
+		embedding, err := p.llmClient.Embed(question)
+		if err == nil {
+			similar, err := p.store.FindSimilarEntities("Concept", "embedding", embedding, 5)
+			if err == nil && len(similar) > 0 {
+				matches = similar
+				log.Printf("Query: found %d entities via embedding similarity", len(matches))
+			}
+		}
+		if err != nil {
+			log.Printf("Warning: embedding search failed, falling back to word match: %v", err)
+		}
+	}
+
+	// Phase 3: If still nothing, try fuzzy word matching
 	if len(matches) == 0 {
 		words := strings.Fields(q)
 		for _, node := range nodes {

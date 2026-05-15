@@ -40,6 +40,18 @@ func FilterTriples(triples []models.Triple) []models.Triple {
 	return filtered
 }
 
+// FilterEntities removes entities with stopword or noise names.
+func FilterEntities(entities []models.Entity) []models.Entity {
+	filtered := make([]models.Entity, 0, len(entities))
+	for _, e := range entities {
+		if isStopNode(e.Name) {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
+}
+
 // FilterEdges removes edges with stopword nodes.
 func FilterEdges(edges []models.EdgeRecord) []models.EdgeRecord {
 	filtered := make([]models.EdgeRecord, 0, len(edges))
@@ -61,5 +73,86 @@ func isStopNode(name string) bool {
 	if utf8.RuneCountInString(name) <= 1 {
 		return true
 	}
-	return stopwords[name]
+	if stopwords[name] {
+		return true
+	}
+	// Reject abstract/operational concepts that the LLM sometimes extracts as entities.
+	// These are generic activity phrases, not proper nouns.
+	if isAbstractNoise(name) {
+		return true
+	}
+	return false
+}
+
+// isAbstractNoise detects generic operational/abstract phrases that shouldn't be graph nodes.
+// A KG should store facts about named things, not generic activity descriptions.
+func isAbstractNoise(lower string) bool {
+	// Phrases ending in noise suffixes are usually abstract activities, not entities
+	noiseSuffixes := []string{
+		" strategy", " hiring", " approvals", " approval", " reporting",
+		" review", " reviews", " roadmap", " planning", " management",
+		" operations", " intelligence", " meetings", " procedures",
+		" guidelines", " standards", " compliance", " optimization",
+		" improvement", " assessment", " evaluation",
+	}
+	for _, s := range noiseSuffixes {
+		if strings.HasSuffix(lower, s) {
+			return true
+		}
+	}
+
+	// Phrases starting with noise prefixes
+	noisePrefixes := []string{
+		"internal ", "external ", "major ", "monthly ", "weekly ", "daily ",
+		"annual ", "quarterly ", "ongoing ", "current ", "future ",
+	}
+	for _, p := range noisePrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+
+	// Multi-word phrases that are purely abstract (no proper noun anchor)
+	// If ALL words are common English words and 4+, it's likely noise
+	words := strings.Fields(lower)
+	if len(words) >= 4 {
+		hasProperNounAnchor := false
+		for _, w := range words {
+			// If any word looks like it could be a proper noun (not a common word),
+			// keep the entity. We check against a small set of structural words.
+			if !isCommonWord(w) {
+				hasProperNounAnchor = true
+				break
+			}
+		}
+		if !hasProperNounAnchor {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isCommonWord returns true if a word is a common English structural/operational word
+// (not a proper noun). Used to detect "all generic words" phrases.
+func isCommonWord(w string) bool {
+	common := map[string]bool{
+		// operational
+		"company": true, "team": true, "desk": true, "office": true, "department": true,
+		"executive": true, "vendor": true, "payment": true, "financial": true,
+		"clinical": true, "medical": true, "health": true, "care": true,
+		"quality": true, "policy": true, "digital": true, "operations": true,
+		"intelligence": true, "knowledge": true, "base": true, "graph": true,
+		"rag": true, "internal": true, "external": true, "major": true,
+		"monthly": true, "weekly": true, "daily": true, "annual": true,
+		// connectors
+		"the": true, "a": true, "an": true, "of": true, "for": true, "and": true,
+		"in": true, "on": true, "at": true, "to": true, "with": true, "by": true,
+		"from": true, "or": true, "not": true, "no": true,
+		// adjectives
+		"new": true, "old": true, "current": true, "future": true, "planned": true,
+		"active": true, "inactive": true, "general": true, "specific": true,
+		"routine": true, "individual": true, "preventive": true,
+	}
+	return common[w]
 }

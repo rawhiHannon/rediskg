@@ -61,7 +61,8 @@ func (s *FalkorStore) ROQuery(cypher string) (interface{}, error) {
 	return s.client.Do(ctx, "GRAPH.RO_QUERY", s.graphName, cypher).Result()
 }
 
-// CreateEntity creates or merges an entity node in the graph.
+// CreateEntity creates or merges an entity node in the graph with properties.
+// Always updates type and properties (not just on create) so validated data overwrites earlier values.
 func (s *FalkorStore) CreateEntity(entity models.Entity) error {
 	name := escapeCypher(entity.Name)
 	entityType := escapeCypher(entity.Type)
@@ -69,25 +70,29 @@ func (s *FalkorStore) CreateEntity(entity models.Entity) error {
 		entityType = "Concept"
 	}
 
-	cypher := fmt.Sprintf(
-		`MERGE (n:%s {name: '%s'}) ON CREATE SET n.type = '%s'`,
-		entityType, name, entityType,
-	)
-
-	// Add properties
-	setParts := []string{}
+	// Build SET parts for properties
+	setParts := []string{fmt.Sprintf("n.type = '%s'", entityType)}
 	for k, v := range entity.Properties {
-		setParts = append(setParts, fmt.Sprintf("n.%s = '%s'", escapeCypher(k), escapeCypher(fmt.Sprint(v))))
+		key := sanitizePropertyKey(k)
+		if key == "" || key == "name" || key == "type" {
+			continue // skip reserved keys
+		}
+		val := escapeCypher(fmt.Sprint(v))
+		setParts = append(setParts, fmt.Sprintf("n.%s = '%s'", key, val))
 	}
-	if len(setParts) > 0 {
-		cypher += ", " + strings.Join(setParts, ", ")
-	}
+	setClause := strings.Join(setParts, ", ")
+
+	cypher := fmt.Sprintf(
+		`MERGE (n:Concept {name: '%s'}) SET %s`,
+		name, setClause,
+	)
 
 	_, err := s.Query(cypher)
 	return err
 }
 
 // CreateEdge creates or merges a relationship in the graph.
+// Always updates entity type (not just on create) so validated types overwrite bad earlier ones.
 func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 	if record.Node1 == record.Node2 {
 		return nil // skip self-referencing edges
@@ -99,14 +104,14 @@ func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 	n1Type := escapeCypher(record.Node1Type)
 	n2Type := escapeCypher(record.Node2Type)
 
-	// Set entity type on nodes if available
+	// Always set type if available (overwrite bad earlier types)
 	n1SetType := ""
 	n2SetType := ""
 	if n1Type != "" {
-		n1SetType = fmt.Sprintf(", a.type = '%s'", n1Type)
+		n1SetType = fmt.Sprintf(" SET a.type = '%s'", n1Type)
 	}
 	if n2Type != "" {
-		n2SetType = fmt.Sprintf(", b.type = '%s'", n2Type)
+		n2SetType = fmt.Sprintf(" SET b.type = '%s'", n2Type)
 	}
 
 	cypher := fmt.Sprintf(
@@ -223,11 +228,42 @@ func (s *FalkorStore) Close() error {
 	return s.client.Close()
 }
 
-// escapeCypher escapes single quotes for Cypher strings.
+// escapeCypher escapes single quotes and semicolons for Cypher strings.
 func escapeCypher(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `'`, `\'`)
+	s = strings.ReplaceAll(s, `;`, `,`)
 	return s
+}
+
+// sanitizePropertyKey converts a string into a valid Cypher property key.
+// Only allows alphanumeric characters and underscores; replaces everything else.
+func sanitizePropertyKey(key string) string {
+	key = strings.TrimSpace(key)
+	result := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			return r
+		}
+		return '_'
+	}, key)
+	// Collapse multiple underscores
+	for strings.Contains(result, "__") {
+		result = strings.ReplaceAll(result, "__", "_")
+	}
+	result = strings.Trim(result, "_")
+	// Cypher property keys can't start with a digit
+	if len(result) > 0 && result[0] >= '0' && result[0] <= '9' {
+		result = "p_" + result
+	}
+	if result == "" {
+		return "prop"
+	}
+	// Truncate long keys (e.g. "agreement_status_with_CedarGate_Health_Network")
+	if len(result) > 40 {
+		result = result[:40]
+		result = strings.TrimRight(result, "_")
+	}
+	return strings.ToLower(result)
 }
 
 // toEdgeType converts a relationship description to a valid Cypher relationship type.

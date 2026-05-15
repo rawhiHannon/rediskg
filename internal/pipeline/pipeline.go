@@ -3,6 +3,7 @@ package pipeline
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"rediskg/internal/chunker"
@@ -68,30 +69,41 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 	allEntities, allTriples := p.extractAll(chunks)
 	log.Printf("Extracted %d entities, %d triples", len(allEntities), len(allTriples))
 
-	// Phase 3: Filter stopword/generic nodes
+	// Phase 3: Filter stopword/generic/noise nodes from both entities and triples
+	beforeE := len(allEntities)
+	allEntities = graph.FilterEntities(allEntities)
 	before := len(allTriples)
 	allTriples = graph.FilterTriples(allTriples)
-	log.Printf("Filtered %d noisy triples (%d remaining)", before-len(allTriples), len(allTriples))
+	log.Printf("Filtered %d noisy entities, %d noisy triples (%d entities, %d triples remaining)",
+		beforeE-len(allEntities), before-len(allTriples), len(allEntities), len(allTriples))
 
-	// Phase 4: Build entity type map and validate relations + fix directions
-	log.Println("Validating relations and directions...")
-	entityMap := buildEntityMap(allEntities)
-	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap)
-
-	// Phase 5: Standardize entity names (merge aliases)
+	// Phase 4: Standardize entity names FIRST (before validation)
 	log.Println("Standardizing entities...")
-	allTriples, err := p.standardizeEntities(allTriples)
+	allTriples, allEntities, err := p.standardizeEntities(allTriples, allEntities)
 	if err != nil {
 		log.Printf("Warning: standardization failed, continuing with raw names: %v", err)
 	}
 
-	// Phase 6: Merge duplicate edges (no proximity — only LLM-extracted edges)
+	// Phase 5: Build entity type map from STANDARDIZED entities, then validate
+	log.Println("Validating relations and directions...")
+	entityMap := buildEntityMap(allEntities)
+	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap)
+
+	// Phase 6: Merge duplicate edges (directed — preserves edge direction)
 	log.Println("Merging edges...")
 	mergedEdges := graph.MergeEdges(allTriples, nil, p.cfg.SemanticWeight)
 	log.Printf("Total merged edges: %d", len(mergedEdges))
 
-	// Phase 7: Store in FalkorDB
-	log.Println("Storing graph in FalkorDB...")
+	// Phase 7: Merge and store entities with properties
+	log.Println("Storing entities with properties...")
+	mergedEntities := mergeEntities(allEntities, entityMap)
+	if err := p.storeEntities(mergedEntities); err != nil {
+		log.Printf("Warning: entity storage failed: %v", err)
+	}
+	log.Printf("Stored %d unique entities with properties", len(mergedEntities))
+
+	// Phase 8: Store edges in FalkorDB
+	log.Println("Storing edges in FalkorDB...")
 	if err := p.storeGraph(mergedEdges); err != nil {
 		return fmt.Errorf("failed to store graph: %w", err)
 	}
@@ -160,7 +172,6 @@ func (p *Pipeline) extractAll(chunks []*models.Chunk) ([]models.Entity, []models
 // When the same entity appears with different types across chunks,
 // the most common type wins.
 func buildEntityMap(entities []models.Entity) map[string]string {
-	// Count type votes per entity
 	votes := map[string]map[string]int{} // name -> type -> count
 	for _, e := range entities {
 		if e.Name == "" || e.Type == "" {
@@ -172,7 +183,6 @@ func buildEntityMap(entities []models.Entity) map[string]string {
 		votes[e.Name][e.Type]++
 	}
 
-	// Pick the most common type for each entity
 	result := map[string]string{}
 	for name, typeCounts := range votes {
 		bestType := ""
@@ -190,7 +200,8 @@ func buildEntityMap(entities []models.Entity) map[string]string {
 }
 
 // standardizeEntities collects all unique node names and asks the LLM to deduplicate them.
-func (p *Pipeline) standardizeEntities(triples []models.Triple) ([]models.Triple, error) {
+// Returns updated triples AND entities with canonical names applied.
+func (p *Pipeline) standardizeEntities(triples []models.Triple, entities []models.Entity) ([]models.Triple, []models.Entity, error) {
 	nameSet := map[string]bool{}
 	for _, t := range triples {
 		nameSet[t.Node1] = true
@@ -203,20 +214,81 @@ func (p *Pipeline) standardizeEntities(triples []models.Triple) ([]models.Triple
 	}
 
 	if len(names) < 3 {
-		return triples, nil
+		return triples, entities, nil
 	}
 
 	mappings, err := llm.StandardizeEntities(p.llmClient, names)
 	if err != nil {
-		return triples, err
+		return triples, entities, err
 	}
 
 	if len(mappings) > 0 {
 		log.Printf("Standardized %d entity name variants", len(mappings))
 		triples = graph.ApplyStandardization(triples, mappings)
+		entities = graph.ApplyStandardizationToEntities(entities, mappings)
 	}
 
-	return triples, nil
+	return triples, entities, nil
+}
+
+// mergeEntities deduplicates entities by name, merging properties and using the validated type.
+func mergeEntities(entities []models.Entity, entityMap map[string]string) []models.Entity {
+	merged := map[string]*models.Entity{}
+
+	for _, e := range entities {
+		if e.Name == "" {
+			continue
+		}
+		existing, ok := merged[e.Name]
+		if !ok {
+			// Use the validated type from entityMap
+			typ := entityMap[e.Name]
+			if typ == "" {
+				typ = e.Type
+			}
+			props := map[string]interface{}{}
+			for k, v := range e.Properties {
+				props[k] = v
+			}
+			merged[e.Name] = &models.Entity{
+				Name:       e.Name,
+				Type:       typ,
+				Properties: props,
+			}
+			continue
+		}
+		// Merge properties: later values overwrite, but descriptions get concatenated
+		for k, v := range e.Properties {
+			if k == "description" {
+				if existDesc, ok := existing.Properties["description"].(string); ok {
+					newDesc, _ := v.(string)
+					if newDesc != "" && !strings.Contains(existDesc, newDesc) {
+						existing.Properties["description"] = existDesc + " " + newDesc
+					}
+				} else {
+					existing.Properties[k] = v
+				}
+			} else {
+				existing.Properties[k] = v
+			}
+		}
+	}
+
+	result := make([]models.Entity, 0, len(merged))
+	for _, e := range merged {
+		result = append(result, *e)
+	}
+	return result
+}
+
+// storeEntities writes all merged entities to FalkorDB with their properties.
+func (p *Pipeline) storeEntities(entities []models.Entity) error {
+	for _, entity := range entities {
+		if err := p.store.CreateEntity(entity); err != nil {
+			log.Printf("Warning: failed to store entity '%s': %v", entity.Name, err)
+		}
+	}
+	return nil
 }
 
 // storeGraph writes all merged edges to FalkorDB.

@@ -9,16 +9,20 @@ import (
 	"rediskg/pkg/models"
 )
 
-// Phase 1: Entity extraction prompt — extracts named entities with universal types.
-const EntityExtractionSystemPrompt = `You are a named entity extractor. Given text (delimited by triple backticks), extract all important named entities.
+// Phase 1: Entity extraction prompt — extracts named entities with universal types, descriptions, and properties.
+const EntityExtractionSystemPrompt = `You are a named entity extractor. Given text (delimited by triple backticks), extract all important named entities with their descriptions and properties.
 
 IMPORTANT: The text may be in any language (Arabic, English, Chinese, mixed, etc.). Extract entity names in their ORIGINAL language. Do not translate.
 
 ## Rules
 - Extract ONLY named or specific entities: proper nouns, named services, named places, specific roles tied to a person.
+- An entity must be something you can point to: a specific person, a specific organization, a specific place, a specific named service.
 - DO NOT extract generic words: "branch", "manager", "partner", "service", "appointment", "phone", "online", "samples", "stock", "booking", "active", "planned".
+- DO NOT extract abstract operational concepts: "company strategy", "executive hiring", "billing policy", "vendor payment approvals", "monthly reporting", "clinical quality", "escalation review", "integration roadmap", "knowledge base", "operations team".
+- DO NOT extract activity descriptions: "preventive health workshops", "routine blood testing", "chronic care management" UNLESS they are clearly named services offered by an organization.
 - DO NOT extract pronouns, determiners, or status words.
 - DO NOT extract raw values: dates, times, phone numbers, IDs. These are properties, not entities.
+- DO NOT extract document titles unless they have a clear document ID (e.g. "SA-2024-019"). Generic titles like "internal operations knowledge base" are NOT entities.
 
 ## Type system
 Classify each entity into exactly one of these universal types:
@@ -35,10 +39,32 @@ Classify each entity into exactly one of these universal types:
 
 IMPORTANT: Clinic branches and labs are "organization", NOT "person". Named services like "dermatology" are "service", NOT "organization".
 
+## Description
+For each entity, write a concise 1-sentence description summarizing what it is and its key attributes based on what the text says.
+
+## Properties
+Extract factual attributes as SIMPLE key-value properties. Use ONLY these property keys:
+- status: "active", "planned", "closed", "under_evaluation", "suspended"
+- phone: phone number
+- email: email address
+- website: URL
+- founded: founding date
+- opened: opening date
+- role: person's job title
+- specialty: professional specialty
+- hours: operating hours
+
+IMPORTANT: Property keys must be single lowercase words (e.g. "status", "phone", "role"). Do NOT create compound keys like "agreement_status_with_X" or "contract_details". Only include properties explicitly stated in the text.
+
 ## Output format (JSON)
 {
   "entities": [
-    {"name": "entity name in original language", "type": "one of the types above"}
+    {
+      "name": "entity name in original language",
+      "type": "one of the types above",
+      "description": "concise 1-sentence description",
+      "properties": {"key": "value"}
+    }
   ]
 }`
 
@@ -49,42 +75,56 @@ IMPORTANT: The text may be in any language. Use entity names exactly as provided
 
 ## Allowed relations (use ONLY these):
 - WORKS_AT: person → organization (person is employed at org)
-- MANAGED_BY: organization → person (org's main manager)
+- MANAGED_BY: organization → person (org's BRANCH-LEVEL manager ONLY — not executives/C-suite)
 - DEPUTY_MANAGER: organization → person (org's deputy/assistant manager)
 - VISITS: person → organization (person visits org regularly)
-- REPORTS_TO: person → person (person reports to another)
+- REPORTS_TO: person → person (person reports to another — ONLY if explicitly stated)
 - SPECIALIZES_IN: person → service (person specializes in service)
+- HAS_ROLE: person → role (person holds this job title, e.g. CEO, CFO, branch manager)
 - OFFERS_SERVICE: organization → service (org offers this service)
 - DOES_NOT_OFFER: organization → service (org explicitly does NOT offer this)
-- HAS_PARTNER: organization → organization (org partners with another)
-- CONTRACTED_WITH: organization → organization (formal contract exists)
+- HAS_PARTNER: organization → organization (org partners with another — ACTIVE partnership only)
+- CONTRACTED_WITH: organization → organization (formal contract exists and is ACTIVE)
 - NO_CONTRACT: organization → organization (explicitly no contract)
 - LOCATED_AT: organization → address (org is at this address)
 - LOCATED_IN: organization → location (org is in this city/region)
 - PART_OF: organization → organization (child/branch is part of parent org, e.g. branch → network)
-- HAS_BRANCH: organization → organization (parent org has this branch, e.g. network → branch)
+- HAS_BRANCH: organization → organization (parent has this ACTIVE branch, e.g. network → branch)
+- HAS_PLANNED_BRANCH: organization → organization (parent has a PLANNED/FUTURE branch — not yet operational)
+- HAS_HEADQUARTERS: organization → organization (org's main headquarters facility)
 - FOUNDED_BY: organization → person (org was founded by person)
-- ALIAS_OF: entity → entity (alternate name → canonical name)
+- ALIAS_OF: entity → entity (alternate name → canonical name — ONLY true aliases, not HQ/facilities)
 - INVOLVED_IN: person → event (person involved in incident/event)
 - USES_TECHNOLOGY: organization → technology (org uses this system)
 
 ## Direction rules (CRITICAL — follow these EXACTLY)
 - WORKS_AT: person is node_1, organization is node_2
-- MANAGED_BY: organization is node_1, person is node_2
+- MANAGED_BY: organization is node_1, person is node_2 (ONLY for branch managers, NOT executives)
 - DEPUTY_MANAGER: organization is node_1, person is node_2
 - VISITS: person is node_1, organization is node_2 (NEVER org → person)
 - OFFERS_SERVICE: organization is node_1, service is node_2 (NEVER service → org)
 - DOES_NOT_OFFER: organization is node_1, service is node_2
 - SPECIALIZES_IN: person is node_1, service is node_2 (NEVER service → person)
+- HAS_ROLE: person is node_1, role is node_2
 - LOCATED_AT: organization is node_1, address is node_2 (NEVER address → org)
 - PART_OF: child is node_1, parent is node_2 (branch → network)
 - HAS_BRANCH: parent is node_1, child is node_2 (network → branch)
+- HAS_PLANNED_BRANCH: parent is node_1, planned child is node_2
+- HAS_HEADQUARTERS: organization is node_1, hq facility is node_2
 - ALIAS_OF: alias/variant is node_1, canonical name is node_2
+
+## MANAGED_BY rules (CRITICAL)
+- MANAGED_BY is ONLY for branch-level managers (the person who runs a specific branch/clinic)
+- C-suite executives (CEO, CFO, COO, CMO, CTO) should use: person → HAS_ROLE → role + person → WORKS_AT → organization
+- Do NOT create MANAGED_BY edges for network-level executives
+- Do NOT infer REPORTS_TO unless the text explicitly says "X reports to Y"
 
 ## Important
 - Extract ONLY facts explicitly stated in the text. Do not infer or guess.
 - If the text says someone does NOT work somewhere, do not create a WORKS_AT edge.
 - Extract negative facts: "Branch X does not offer Y" → DOES_NOT_OFFER
+- Distinguish ACTIVE from PLANNED: If a branch is "planned", "under construction", or "not yet open", use HAS_PLANNED_BRANCH not HAS_BRANCH.
+- HQ/headquarters is a facility, NOT an alias of the org. Use HAS_HEADQUARTERS.
 - Use entity names EXACTLY as given in the entity list. Do not create new entities.
 
 ## Output format (JSON)
@@ -128,19 +168,35 @@ func ExtractEntitiesFromChunk(client *Client, text string) ([]models.Entity, err
 	}
 
 	var result struct {
-		Entities []models.Entity `json:"entities"`
+		Entities []struct {
+			Name        string                 `json:"name"`
+			Type        string                 `json:"type"`
+			Description string                 `json:"description"`
+			Properties  map[string]interface{} `json:"properties"`
+		} `json:"entities"`
 	}
 	if err := json.Unmarshal([]byte(response), &result); err != nil {
 		log.Printf("Warning: failed to parse entity extraction response: %v\nResponse: %s", err, response)
 		return nil, nil
 	}
 
-	for i := range result.Entities {
-		result.Entities[i].Name = normalizeNodeName(result.Entities[i].Name)
-		result.Entities[i].Type = strings.ToLower(strings.TrimSpace(result.Entities[i].Type))
+	entities := make([]models.Entity, 0, len(result.Entities))
+	for _, e := range result.Entities {
+		props := e.Properties
+		if props == nil {
+			props = map[string]interface{}{}
+		}
+		if e.Description != "" {
+			props["description"] = e.Description
+		}
+		entities = append(entities, models.Entity{
+			Name:       normalizeNodeName(e.Name),
+			Type:       strings.ToLower(strings.TrimSpace(e.Type)),
+			Properties: props,
+		})
 	}
 
-	return result.Entities, nil
+	return entities, nil
 }
 
 // ExtractRelationsFromChunk extracts relations between known entities (Phase 2).
