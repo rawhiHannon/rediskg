@@ -94,6 +94,8 @@ func isAbstractNoise(lower string) bool {
 		" operations", " intelligence", " meetings", " procedures",
 		" guidelines", " standards", " compliance", " optimization",
 		" improvement", " assessment", " evaluation",
+		" concerns", " disputes", " refunds", " issues", " protocols",
+		" escalation", " resolution", " tracking", " oversight",
 	}
 	for _, s := range noiseSuffixes {
 		if strings.HasSuffix(lower, s) {
@@ -105,6 +107,7 @@ func isAbstractNoise(lower string) bool {
 	noisePrefixes := []string{
 		"internal ", "external ", "major ", "monthly ", "weekly ", "daily ",
 		"annual ", "quarterly ", "ongoing ", "current ", "future ",
+		"operational ", "administrative ",
 	}
 	for _, p := range noisePrefixes {
 		if strings.HasPrefix(lower, p) {

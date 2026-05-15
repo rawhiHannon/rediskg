@@ -84,10 +84,42 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 		log.Printf("Warning: standardization failed, continuing with raw names: %v", err)
 	}
 
-	// Phase 5: Build entity type map from STANDARDIZED entities, then validate
-	log.Println("Validating relations and directions...")
+	// Phase 5: Build entity type map, correct types deterministically, then LLM-classify ambiguous ones
+	log.Println("Correcting entity types...")
 	entityMap := buildEntityMap(allEntities)
+	locked := graph.CorrectEntityTypes(entityMap)
+
+	// Collect entities not locked by deterministic rules — ask the LLM to classify them
+	ambiguous := map[string]string{}
+	for name, typ := range entityMap {
+		if !locked[name] {
+			ambiguous[name] = typ
+		}
+	}
+	if len(ambiguous) > 0 {
+		log.Printf("Classifying %d ambiguous entities via LLM...", len(ambiguous))
+		classifications, err := llm.ClassifyEntityTypes(p.llmClient, ambiguous)
+		if err != nil {
+			log.Printf("Warning: LLM classification failed, continuing with existing types: %v", err)
+		} else if classifications != nil {
+			classified := 0
+			for name, newType := range classifications {
+				if _, ok := entityMap[name]; ok && newType != "" {
+					entityMap[name] = newType
+					locked[name] = true
+					classified++
+				}
+			}
+			log.Printf("LLM classified %d entities", classified)
+		}
+	}
+
+	// Phase 5b: Validate relations using the corrected entity types
+	log.Println("Validating relations and directions...")
 	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap)
+
+	// Phase 5c: Propagate types from VALIDATED edges for any remaining untyped entities
+	graph.PropagateTypesFromTriples(allTriples, entityMap, locked)
 
 	// Phase 6: Merge duplicate edges (directed — preserves edge direction)
 	log.Println("Merging edges...")

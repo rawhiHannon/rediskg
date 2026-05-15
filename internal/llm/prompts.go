@@ -271,6 +271,64 @@ func StandardizeEntities(client *Client, entityNames []string) (map[string]strin
 	return result.Mappings, nil
 }
 
+// ClassifyEntityTypesPrompt asks the LLM to classify ambiguous entity names.
+const ClassifyEntityTypesPrompt = `You are an entity type classifier. Given a list of entity names, classify each into exactly one type.
+
+## Type system
+- person: Named individual (e.g. "noa shapira", "dr. sarah cohen", "lina mansour")
+- organization: Company, network, lab, pharmacy, clinic, hospital, insurer (e.g. "cedargate health network", "haifa central clinic")
+- location: City, region, country (e.g. "haifa", "tel aviv", "israel")
+- address: Street address (e.g. "22 herzl street, haifa")
+- service: Something offered, provided, booked, or performed (e.g. "dermatology", "physical therapy", "blood testing")
+- role: Job title or function (e.g. "branch manager", "chief medical officer")
+- event: Named incident, meeting, or occurrence (e.g. "incident cg-2025-004")
+- document: Named document, policy, or agreement (e.g. "service agreement sa-2024-019")
+- technology: Software, system, portal, platform (e.g. "mycedar portal", "labsync pro")
+- concept: Abstract topic or category that doesn't fit above (e.g. "billing policy", "triage protocol")
+
+## Rules
+- A 2-3 word name with no technical/organizational keywords is usually a person name.
+- Names containing "clinic", "hospital", "lab", "pharmacy", "network" etc. are organizations.
+- Names containing "portal", "system", "software", "platform" etc. are technology.
+- If uncertain, prefer "person" for short human-sounding names and "concept" for abstract terms.
+
+## Output format (JSON)
+{
+  "classifications": {
+    "entity name": "type",
+    "another entity": "type"
+  }
+}`
+
+// ClassifyEntityTypes asks the LLM to classify a batch of ambiguous entity names into types.
+func ClassifyEntityTypes(client *Client, entities map[string]string) (map[string]string, error) {
+	if len(entities) == 0 {
+		return nil, nil
+	}
+
+	// Send only entity names — do NOT include current types to avoid biasing the LLM
+	lines := make([]string, 0, len(entities))
+	for name := range entities {
+		lines = append(lines, fmt.Sprintf("- %s", name))
+	}
+	userPrompt := fmt.Sprintf("Classify these entities:\n%s", strings.Join(lines, "\n"))
+
+	response, err := client.Complete(ClassifyEntityTypesPrompt, userPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("entity classification failed: %w", err)
+	}
+
+	var result struct {
+		Classifications map[string]string `json:"classifications"`
+	}
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
+		log.Printf("Warning: failed to parse classification response: %v", err)
+		return nil, nil
+	}
+
+	return result.Classifications, nil
+}
+
 // normalizeNodeName trims whitespace and lowercases Latin characters.
 func normalizeNodeName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))

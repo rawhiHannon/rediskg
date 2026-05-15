@@ -32,6 +32,10 @@ func (c *Client) Complete(systemPrompt, userPrompt string) (string, error) {
 	switch c.cfg.LLMProvider {
 	case "openai":
 		return c.openaiComplete(systemPrompt, userPrompt)
+	case "gemini":
+		return c.geminiComplete(systemPrompt, userPrompt)
+	case "claude":
+		return c.claudeComplete(systemPrompt, userPrompt)
 	case "ollama":
 		return c.ollamaComplete(systemPrompt, userPrompt)
 	default:
@@ -49,8 +53,13 @@ func (c *Client) Embed(text string) ([]float32, error) {
 	switch provider {
 	case "openai":
 		return c.openaiEmbed(text)
+	case "gemini":
+		return c.geminiEmbed(text)
 	case "ollama":
 		return c.ollamaEmbed(text)
+	case "claude":
+		// Claude doesn't have an embedding API; fall back to OpenAI embeddings
+		return c.openaiEmbed(text)
 	default:
 		return c.openaiEmbed(text)
 	}

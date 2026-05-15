@@ -6,10 +6,12 @@ type Config struct {
 	GraphName string
 
 	// LLM
-	LLMProvider string // "openai", "claude", "gemini", "ollama"
-	LLMModel    string
-	APIKey      string
-	OllamaURL   string // default http://localhost:11434
+	LLMProvider  string // "openai", "claude", "gemini", "ollama"
+	LLMModel     string
+	APIKey       string // OpenAI API key (also used as fallback)
+	GeminiAPIKey string // Gemini API key
+	ClaudeAPIKey string // Claude/Anthropic API key
+	OllamaURL    string // default http://localhost:11434
 
 	// Embedding
 	EmbeddingProvider  string // defaults to LLMProvider

@@ -92,7 +92,7 @@ func (s *FalkorStore) CreateEntity(entity models.Entity) error {
 }
 
 // CreateEdge creates or merges a relationship in the graph.
-// Always updates entity type (not just on create) so validated types overwrite bad earlier ones.
+// Always updates entity types so validated types overwrite bad earlier ones.
 func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 	if record.Node1 == record.Node2 {
 		return nil // skip self-referencing edges
@@ -104,26 +104,29 @@ func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 	n1Type := escapeCypher(record.Node1Type)
 	n2Type := escapeCypher(record.Node2Type)
 
-	// Always set type if available (overwrite bad earlier types)
-	n1SetType := ""
-	n2SetType := ""
+	// Build type SET clauses (applied after both MERGEs, always overwrites)
+	var typeSets []string
 	if n1Type != "" {
-		n1SetType = fmt.Sprintf(" SET a.type = '%s'", n1Type)
+		typeSets = append(typeSets, fmt.Sprintf("a.type = '%s'", n1Type))
 	}
 	if n2Type != "" {
-		n2SetType = fmt.Sprintf(" SET b.type = '%s'", n2Type)
+		typeSets = append(typeSets, fmt.Sprintf("b.type = '%s'", n2Type))
+	}
+	typeSetClause := ""
+	if len(typeSets) > 0 {
+		typeSetClause = fmt.Sprintf(" SET %s", strings.Join(typeSets, ", "))
 	}
 
 	cypher := fmt.Sprintf(
 		`MERGE (a:Concept {name: '%s'})
-		 ON CREATE SET a.name = '%s'%s
+		 ON CREATE SET a.name = '%s'
 		 MERGE (b:Concept {name: '%s'})
 		 ON CREATE SET b.name = '%s'%s
 		 MERGE (a)-[r:%s]->(b)
 		 ON CREATE SET r.description = '%s', r.weight = %f, r.inferred = %t, r.chunk_ids = '%s'
 		 ON MATCH SET r.weight = r.weight + %f, r.chunk_ids = r.chunk_ids + ',%s'`,
-		n1, n1, n1SetType,
-		n2, n2, n2SetType,
+		n1, n1,
+		n2, n2, typeSetClause,
 		edgeType, edgeDesc,
 		record.Weight, record.Inferred, strings.Join(record.ChunkIDs, ","),
 		record.Weight, strings.Join(record.ChunkIDs, ","),

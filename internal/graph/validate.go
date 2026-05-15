@@ -72,14 +72,14 @@ var directionRules = map[string]directionRule{
 	"WORKS_AT":         {sourceTypes: []string{"person"}, targetTypes: []string{"organization"}},
 	"MANAGED_BY":       {sourceTypes: []string{"organization"}, targetTypes: []string{"person"}},
 	"DEPUTY_MANAGER":   {sourceTypes: []string{"organization"}, targetTypes: []string{"person"}},
-	"VISITS":           {sourceTypes: []string{"person"}, targetTypes: []string{"organization", "location"}},
+	"VISITS":           {sourceTypes: []string{"person"}, targetTypes: []string{"organization"}},
 	"OFFERS_SERVICE":   {sourceTypes: []string{"organization"}, targetTypes: []string{"service"}},
 	"DOES_NOT_OFFER":   {sourceTypes: []string{"organization"}, targetTypes: []string{"service"}},
 	"HAS_PARTNER":      {sourceTypes: []string{"organization"}, targetTypes: []string{"organization"}},
 	"CONTRACTED_WITH":  {sourceTypes: []string{"organization"}, targetTypes: []string{"organization"}},
 	"NO_CONTRACT":      {sourceTypes: []string{"organization"}, targetTypes: []string{"organization"}},
 	"REPORTS_TO":       {sourceTypes: []string{"person"}, targetTypes: []string{"person"}},
-	"SPECIALIZES_IN":   {sourceTypes: []string{"person"}, targetTypes: []string{"service", "concept"}},
+	"SPECIALIZES_IN":   {sourceTypes: []string{"person"}, targetTypes: []string{"service"}},
 	"HAS_ROLE":         {sourceTypes: []string{"person"}, targetTypes: []string{"role", "concept"}},
 	"LOCATED_IN":       {sourceTypes: []string{"organization", "address"}, targetTypes: []string{"location"}},
 	"LOCATED_AT":       {sourceTypes: []string{"organization"}, targetTypes: []string{"address"}},
@@ -208,11 +208,8 @@ func PropagateTypesFromTriples(triples []models.Triple, entityMap map[string]str
 // ValidateAndNormalizeTriples normalizes relation names, fixes entity types
 // using deterministic rules, and corrects edge direction.
 func ValidateAndNormalizeTriples(triples []models.Triple, entityMap map[string]string) []models.Triple {
-	// First: fix entity types deterministically in the entity map
-	locked := correctEntityTypes(entityMap)
-
-	// Second: propagate types from graph structure (replaces hardcoded city lists etc.)
-	PropagateTypesFromTriples(triples, entityMap, locked)
+	// Fix entity types deterministically in the entity map
+	CorrectEntityTypes(entityMap)
 
 	var result []models.Triple
 	flipped := 0
@@ -253,8 +250,8 @@ func ValidateAndNormalizeTriples(triples []models.Triple, entityMap map[string]s
 		t.Node1Type = n1Fixed
 		t.Node2Type = n2Fixed
 
-		// Apply relation-based type repair
-		t = repairTypesFromRelation(t)
+		// Fill missing types from relation (ONLY fill empty, never override)
+		t = fillMissingTypesFromRelation(t)
 
 		// Update entity map with corrected types
 		if t.Node1Type != "" {
@@ -322,8 +319,14 @@ func ValidateAndNormalizeTriples(triples []models.Triple, entityMap map[string]s
 	// Post-pass: limit MANAGED_BY to 1 per org, convert extras to WORKS_AT
 	result, demoted := limitManagedBy(result)
 
-	log.Printf("Validation: normalized %d, type-corrected %d, flipped %d, converted %d PART_OF→HAS_BRANCH, alias-fixed %d, demoted %d MANAGED_BY→WORKS_AT, rejected %d (of %d total)",
-		normalized, typeCorrected, flipped, converted, aliasFixed, demoted, rejected, len(triples))
+	// Post-pass: resolve contradictions (NO_CONTRACT removes HAS_PARTNER/CONTRACTED_WITH)
+	result, contradictions := resolveContradictions(result)
+
+	// Post-pass: HAS_PLANNED_BRANCH trumps HAS_BRANCH for the same pair
+	result, plannedDedup := deduplicatePlannedBranches(result)
+
+	log.Printf("Validation: normalized %d, type-corrected %d, flipped %d, converted %d PART_OF→HAS_BRANCH, alias-fixed %d, demoted %d MANAGED_BY→WORKS_AT, contradictions %d, planned-dedup %d, rejected %d (of %d total)",
+		normalized, typeCorrected, flipped, converted, aliasFixed, demoted, contradictions, plannedDedup, rejected, len(triples))
 
 	return result
 }
@@ -350,35 +353,23 @@ func fixBadAlias(t models.Triple) (models.Triple, bool) {
 		return t, true
 	}
 
-	// technology -> ALIAS_OF -> organization → convert to USES_TECHNOLOGY
-	if t.Node1Type == "technology" && t.Node2Type == "organization" {
-		t.Edge = "USES_TECHNOLOGY"
+	// HQ -> ALIAS_OF -> organization → drop (HQ relationships handled elsewhere)
+	if isHQNode(t.Node1) || isHQNode(t.Node2) {
+		return t, false
+	}
+
+	// Cross-type aliases are invalid — reject them
+	// (e.g., technology -> ALIAS_OF -> organization would corrupt types)
+	if t.Node1Type != "" && t.Node2Type != "" && t.Node1Type != t.Node2Type {
+		return t, false
+	}
+
+	// Valid ALIAS_OF: same type or one/both types empty.
+	// Ensure direction: shorter/abbreviation → canonical (longer name).
+	if len(t.Node1) > len(t.Node2) {
 		t.Node1, t.Node2 = t.Node2, t.Node1
-		t.Node1Type, t.Node2Type = "organization", "technology"
-		return t, true
+		t.Node1Type, t.Node2Type = t.Node2Type, t.Node1Type
 	}
-
-	// organization -> ALIAS_OF -> technology → convert to USES_TECHNOLOGY
-	if t.Node1Type == "organization" && t.Node2Type == "technology" {
-		t.Edge = "USES_TECHNOLOGY"
-		return t, true
-	}
-
-	// HQ -> ALIAS_OF -> organization → convert to HAS_HEADQUARTERS (HQ is a facility, not an alias)
-	if isHQNode(t.Node1) && t.Node2Type == "organization" {
-		t.Edge = "HAS_HEADQUARTERS"
-		// org → HAS_HEADQUARTERS → hq
-		t.Node1, t.Node2 = t.Node2, t.Node1
-		t.Node1Type, t.Node2Type = "organization", "organization"
-		return t, true
-	}
-	if isHQNode(t.Node2) && t.Node1Type == "organization" {
-		t.Edge = "HAS_HEADQUARTERS"
-		t.Node2Type = "organization"
-		return t, true
-	}
-
-	// Valid ALIAS_OF: same type or both empty types
 	return t, true
 }
 
@@ -481,9 +472,72 @@ func limitManagedBy(triples []models.Triple) ([]models.Triple, int) {
 	return result, demoted
 }
 
-// correctEntityTypes applies deterministic type corrections to the entity map.
+// resolveContradictions removes edges that contradict negative-fact edges.
+// For example, if NO_CONTRACT exists between A and B, then CONTRACTED_WITH,
+// HAS_PARTNER, and USES_TECHNOLOGY edges between the same pair are removed.
+func resolveContradictions(triples []models.Triple) ([]models.Triple, int) {
+	// Collect negative-fact pairs (unordered)
+	type pair struct{ a, b string }
+	negativePairs := map[pair]bool{}
+	for _, t := range triples {
+		if t.Edge == "NO_CONTRACT" {
+			negativePairs[pair{t.Node1, t.Node2}] = true
+			negativePairs[pair{t.Node2, t.Node1}] = true
+		}
+	}
+
+	if len(negativePairs) == 0 {
+		return triples, 0
+	}
+
+	contradicts := map[string]bool{
+		"CONTRACTED_WITH": true,
+		"HAS_PARTNER":     true,
+		"USES_TECHNOLOGY": true,
+	}
+
+	removed := 0
+	result := make([]models.Triple, 0, len(triples))
+	for _, t := range triples {
+		if contradicts[t.Edge] && negativePairs[pair{t.Node1, t.Node2}] {
+			removed++
+			continue
+		}
+		result = append(result, t)
+	}
+	return result, removed
+}
+
+// deduplicatePlannedBranches removes HAS_BRANCH edges when HAS_PLANNED_BRANCH
+// exists for the same (parent, child) pair. Planned status trumps active.
+func deduplicatePlannedBranches(triples []models.Triple) ([]models.Triple, int) {
+	type pair struct{ parent, child string }
+	planned := map[pair]bool{}
+	for _, t := range triples {
+		if t.Edge == "HAS_PLANNED_BRANCH" {
+			planned[pair{t.Node1, t.Node2}] = true
+		}
+	}
+
+	if len(planned) == 0 {
+		return triples, 0
+	}
+
+	removed := 0
+	result := make([]models.Triple, 0, len(triples))
+	for _, t := range triples {
+		if t.Edge == "HAS_BRANCH" && planned[pair{t.Node1, t.Node2}] {
+			removed++
+			continue
+		}
+		result = append(result, t)
+	}
+	return result, removed
+}
+
+// CorrectEntityTypes applies deterministic type corrections to the entity map.
 // Returns the set of entity names that were deterministically corrected (protected from propagation override).
-func correctEntityTypes(entityMap map[string]string) map[string]bool {
+func CorrectEntityTypes(entityMap map[string]string) map[string]bool {
 	locked := map[string]bool{}
 	for name, typ := range entityMap {
 		fixed := inferEntityType(name, typ)
@@ -506,27 +560,46 @@ func typeMatchedRule(name, typ string) bool {
 	lower := strings.ToLower(name)
 	switch typ {
 	case "person":
-		return strings.HasPrefix(lower, "dr.") || strings.HasPrefix(lower, "dr ")
+		return hasProfessionalTitlePrefix(lower)
 	case "address":
 		return addressPatternEN.MatchString(name) || addressPatternHE.MatchString(name) || hasAddressIndicator(lower)
 	case "event":
 		return incidentPattern.MatchString(name)
+	case "role":
+		return isRoleTitle(lower)
 	case "organization":
 		return isHQNode(lower) || isFacilityByName(lower) || isOrgByName(lower)
 	case "technology":
-		return looksLikeTechnology(lower) && !looksLikePersonName(lower)
-	case "role":
-		return isRoleTitle(lower)
+		return looksLikeTechnology(lower)
+	}
+	return false
+}
+
+// hasProfessionalTitlePrefix checks if a name starts with a professional title
+// (dr., dietitian, physiotherapist, nurse, etc.) indicating a person.
+func hasProfessionalTitlePrefix(lower string) bool {
+	prefixes := []string{
+		"dr.", "dr ", "prof.", "prof ",
+		"dietitian ", "physiotherapist ", "pharmacist ", "therapist ",
+		"nurse ", "midwife ", "dentist ", "optometrist ", "psychologist ",
+		"psychiatrist ", "surgeon ", "radiologist ", "pathologist ",
+		"technician ", "paramedic ",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
 	}
 	return false
 }
 
 // inferEntityType applies deterministic rules to correct entity types based on name patterns.
+// Rule priority: person prefix > address > event > role > facility > org keywords > tech > person fallback
 func inferEntityType(name, currentType string) string {
 	lower := strings.ToLower(name)
 
-	// Rule 1: Names starting with "dr." or "dr " are persons
-	if strings.HasPrefix(lower, "dr.") || strings.HasPrefix(lower, "dr ") {
+	// Rule 1: Names starting with professional titles are persons
+	if hasProfessionalTitlePrefix(lower) {
 		return "person"
 	}
 
@@ -545,31 +618,30 @@ func inferEntityType(name, currentType string) string {
 		return "event"
 	}
 
-	// Rule 5: Names containing HQ/headquarters/facility words are organizations
-	if isHQNode(lower) || isFacilityByName(lower) {
-		return "organization"
-	}
-
-	// Rule 6: Organization by general keywords (clinic, hospital, etc.)
-	if isOrgByName(lower) {
-		return "organization"
-	}
-
-	// Rule 7: Technology by keywords (portal, system, software, etc.)
-	if looksLikeTechnology(lower) && !looksLikePersonName(lower) {
-		return "technology"
-	}
-
-	// Rule 8: Known role titles should be typed as role
+	// Rule 5: Known role titles (MUST come before facility/org/tech checks
+	// because "branch manager" contains "branch", "chief operations officer"
+	// contains "office" as substring, "head of digital systems" contains "system")
 	if isRoleTitle(lower) {
 		return "role"
 	}
 
-	// Rule 9: Short 2-3 word names without org/service/tech keywords that are mistyped
-	// as organization or event are likely persons
-	if (currentType == "organization" || currentType == "event" || currentType == "") && looksLikePersonName(lower) {
-		return "person"
+	// Rule 6: Names containing HQ/headquarters/facility words are organizations
+	if isHQNode(lower) || isFacilityByName(lower) {
+		return "organization"
 	}
+
+	// Rule 7: Organization by general keywords (clinic, hospital, etc.)
+	if isOrgByName(lower) {
+		return "organization"
+	}
+
+	// Rule 8: Technology by keywords (portal, system, software, etc.)
+	if looksLikeTechnology(lower) {
+		return "technology"
+	}
+
+	// Rule 9 removed: ambiguous names (person vs. org vs. concept) are now
+	// classified by the LLM via ClassifyEntityTypes in the pipeline.
 
 	return currentType
 }
@@ -583,13 +655,22 @@ func isHQNode(name string) bool {
 // isFacilityByName checks if a name contains general facility/building words
 // that indicate an organization or physical location, not a person.
 func isFacilityByName(lower string) bool {
-	facilityWords := []string{
-		"center", "centre", "hub", "campus", "annex", "office",
-		"branch", "headquarters", "hq", "building", "facility",
+	// These are safe as substring matches (unlikely to appear inside other words)
+	safeSubstrings := []string{
+		"center", "centre", "hub", "campus", "annex",
+		"headquarters", "building", "facility",
 		"warehouse", "depot", "terminal",
 	}
-	for _, w := range facilityWords {
+	for _, w := range safeSubstrings {
 		if strings.Contains(lower, w) {
+			return true
+		}
+	}
+	// These need whole-word matching to avoid false positives
+	// ("office" in "officer", "branch" in "branching")
+	wholeWords := []string{"office", "branch", "hq"}
+	for _, w := range wholeWords {
+		if containsWord(lower, w) {
 			return true
 		}
 	}
@@ -600,7 +681,7 @@ func isFacilityByName(lower string) bool {
 // No domain-specific prefixes — only structural patterns.
 func isOrgByName(lower string) bool {
 	orgWords := []string{
-		"clinic", "hospital", "pharmacy", "laboratory", "diagnostics",
+		"clinic", "hospital", "pharmacy", "laboratory",
 		"imaging", "transport", "courier", "network", "insurance",
 		"bank", "university", "school", "institute", "foundation",
 		"corporation", "agency", "authority", "ministry",
@@ -612,6 +693,11 @@ func isOrgByName(lower string) bool {
 	}
 	// Check for "lab"/"labs" as whole words (avoid matching "label", "collaborate")
 	if containsWord(lower, "lab") || containsWord(lower, "labs") {
+		return true
+	}
+	// "diagnostics" is only an org indicator in multi-word names (e.g. "northlab diagnostics")
+	// Standalone "diagnostics" is a service name
+	if len(strings.Fields(lower)) >= 2 && strings.Contains(lower, "diagnostics") {
 		return true
 	}
 	return false
@@ -633,125 +719,20 @@ func hasAddressIndicator(lower string) bool {
 	return false
 }
 
-// looksLikePersonName checks if a name looks like a person's name.
-// A 2-3 word name with no org/service/location keywords is likely a person.
-func looksLikePersonName(lower string) bool {
-	words := strings.Fields(lower)
-	if len(words) < 2 || len(words) > 4 {
-		return false
-	}
-
-	// Names with org keywords are not persons
-	orgKeywords := []string{
-		"clinic", "center", "hospital", "pharmacy", "lab", "laboratory",
-		"network", "hub", "transport", "medical", "health", "care",
-		"insurance", "diagnostics", "services", "inc", "ltd", "corp",
-		"company", "group", "foundation",
-	}
-	for _, kw := range orgKeywords {
-		if strings.Contains(lower, kw) {
-			return false
-		}
-	}
-
-	// Names with service/concept keywords are not persons
-	nonPersonKeywords := []string{
-		"service", "delivery", "courier", "testing", "monitoring",
-		"therapy", "consultation", "treatment", "screening",
-		"counseling", "vaccination", "medicine", "policy", "protocol",
-		"agreement", "portal", "system", "technology",
-	}
-	for _, kw := range nonPersonKeywords {
-		if strings.Contains(lower, kw) {
-			return false
-		}
-	}
-
-	// Passed all exclusion filters — likely a person name
-	return true
-}
-
-// repairTypesFromRelation uses the relation itself to fix missing or wrong entity types.
-func repairTypesFromRelation(t models.Triple) models.Triple {
+// fillMissingTypesFromRelation uses the relation to fill ONLY empty entity types.
+// It never overrides existing types — if the relation contradicts a known type,
+// the edge will be rejected later by isValidEdge.
+func fillMissingTypesFromRelation(t models.Triple) models.Triple {
 	rule, ok := directionRules[t.Edge]
 	if !ok {
 		return t
 	}
 
-	// Fill in missing types from the rule
-	if len(rule.sourceTypes) > 0 && t.Node1Type == "" {
+	if t.Node1Type == "" && len(rule.sourceTypes) == 1 {
 		t.Node1Type = rule.sourceTypes[0]
 	}
-	if len(rule.targetTypes) > 0 && t.Node2Type == "" {
+	if t.Node2Type == "" && len(rule.targetTypes) == 1 {
 		t.Node2Type = rule.targetTypes[0]
-	}
-
-	// For relations with unambiguous type expectations, force-correct types
-	switch t.Edge {
-	case "OFFERS_SERVICE", "DOES_NOT_OFFER":
-		if t.Node2Type != "service" {
-			t.Node2Type = "service"
-		}
-		if t.Node1Type != "organization" {
-			t.Node1Type = "organization"
-		}
-	case "MANAGED_BY", "DEPUTY_MANAGER":
-		if t.Node2Type != "person" {
-			t.Node2Type = "person"
-		}
-		if t.Node1Type != "organization" {
-			t.Node1Type = "organization"
-		}
-	case "WORKS_AT":
-		if t.Node1Type != "person" {
-			t.Node1Type = "person"
-		}
-		if t.Node2Type != "organization" {
-			t.Node2Type = "organization"
-		}
-	case "VISITS":
-		if t.Node1Type != "person" {
-			t.Node1Type = "person"
-		}
-	case "SPECIALIZES_IN":
-		if t.Node1Type != "person" {
-			t.Node1Type = "person"
-		}
-		if t.Node2Type != "service" && t.Node2Type != "concept" {
-			t.Node2Type = "service"
-		}
-	case "LOCATED_AT":
-		if t.Node1Type != "organization" {
-			t.Node1Type = "organization"
-		}
-		if t.Node2Type != "address" {
-			t.Node2Type = "address"
-		}
-	case "LOCATED_IN":
-		if t.Node2Type != "location" {
-			t.Node2Type = "location"
-		}
-	case "INVOLVED_IN":
-		if t.Node1Type != "person" {
-			t.Node1Type = "person"
-		}
-		if t.Node2Type != "event" {
-			t.Node2Type = "event"
-		}
-	case "USES_TECHNOLOGY":
-		if t.Node1Type != "organization" {
-			t.Node1Type = "organization"
-		}
-		if t.Node2Type != "technology" {
-			t.Node2Type = "technology"
-		}
-	case "HAS_ROLE":
-		if t.Node1Type != "person" {
-			t.Node1Type = "person"
-		}
-		if t.Node2Type != "role" && t.Node2Type != "concept" {
-			t.Node2Type = "role"
-		}
 	}
 
 	return t
@@ -853,40 +834,29 @@ func containsType(allowed []string, entityType string) bool {
 }
 
 // looksLikeTechnology checks if a name plausibly refers to technology/software.
-// Uses the entity's type (set by LLM or propagation) as the primary signal,
-// with tech keyword matching as a secondary check.
+// Only returns true if the name contains an explicit tech keyword.
 func looksLikeTechnology(name string) bool {
 	lower := strings.ToLower(name)
 
-	// Positive: tech keywords in the name
 	techWords := []string{
-		"portal", "system", "software", "platform", "app", "module",
+		"portal", "software", "platform", "module",
 		"dashboard", "api", "database", "server", "cloud", "sync",
-		"tracker", "scanner", "monitor", "tool", "suite", "engine",
-		"pro", "lite", "plus", "hub",
+		"scanner", "suite", "engine",
 	}
 	for _, w := range techWords {
 		if strings.Contains(lower, w) {
 			return true
 		}
 	}
-
-	// Negative: org keywords in the name — not technology
-	if isOrgByName(lower) {
-		return false
+	// Whole-word matches for terms that are substrings of non-tech words
+	// ("system" in "ecosystem", "app" in "happy", "tool" in "stool",
+	//  "tracker" in unrelated contexts, "monitor" in "monitoring")
+	techWholeWords := []string{"system", "app", "tool", "tracker"}
+	for _, w := range techWholeWords {
+		if containsWord(lower, w) {
+			return true
+		}
 	}
 
-	// Negative: person-like names
-	if strings.HasPrefix(lower, "dr.") || strings.HasPrefix(lower, "dr ") {
-		return false
-	}
-
-	// Negative: multi-word names without tech keywords are unlikely tech
-	words := strings.Fields(lower)
-	if len(words) >= 2 {
-		return false
-	}
-
-	// Single word with no tech indicator — ambiguous, allow
-	return true
+	return false
 }
