@@ -1,0 +1,28 @@
+# Environment and secrets
+.env
+.env.*
+
+# Binary
+rediskg
+/bin/
+
+# Build artifacts
+*.so
+*.o
+*.a
+
+# FalkorDB build artifacts
+/lib/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+/vendor/
