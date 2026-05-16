@@ -251,7 +251,14 @@ func (s *Schema) RewriteEntities(entities []models.Entity) []models.Entity {
 		resolvedType := s.NormalizeEntityType(e.Type)
 		result[i].Type = resolvedType
 
-		// Check if this is a role-like type
+		// Fix HQ/headquarters entities — these are organizations, not locations
+		if looksLikeHQ(e.Name) && (resolvedType == "location" || resolvedType == "") {
+			result[i].BaseType = "organization"
+			result[i].Type = "organization"
+			continue
+		}
+
+		// Check if this is a role-like type (via schema)
 		et := s.GetEntityType(resolvedType)
 		if et != nil && isRoleBaseType(et, s) {
 			if looksLikePersonName(e.Name) {
@@ -267,6 +274,13 @@ func (s *Schema) RewriteEntities(entities []models.Entity) []models.Entity {
 				result[i].Type = "role"
 				roleKept++
 			}
+		} else if looksLikeRoleName(e.Name) && !looksLikePersonName(e.Name) {
+			// Name-based role detection: catches profession phrases typed as "person"
+			// e.g. "diabetes educator", "mental wellness counselor", "visiting dermatologist"
+			result[i].BaseType = "role"
+			result[i].DomainType = resolvedType
+			result[i].Type = "role"
+			roleKept++
 		} else if et != nil {
 			// Set base type from schema
 			if len(et.BaseTypes) > 0 {
@@ -306,6 +320,12 @@ func (s *Schema) RewriteTriples(triples []models.Triple, entityMap map[string]st
 		// Remove ALIAS_OF triples — entity aliases are handled by standardization, not as edges
 		if strings.ToUpper(t.Edge) == "ALIAS_OF" {
 			aliasRemoved++
+			continue
+		}
+
+		// Reject triples where an endpoint is typed as "alias" — these should have been rewritten
+		if entityMap[t.Node1] == "alias" || entityMap[t.Node2] == "alias" {
+			rejected++
 			continue
 		}
 
@@ -453,6 +473,25 @@ func applyRelationEnforcement(edge, srcBase, tgtBase string, t *models.Triple) b
 			return false
 		}
 
+	case "OPERATES", "HAS_BRANCH":
+		// OPERATES: parent org → child org/branch
+		// Both should be organizations. If child→parent detected, flip.
+		if srcBase == "organization" && tgtBase == "organization" {
+			// Use name heuristics: if target name contains source name prefix, it's likely child→parent (wrong)
+			srcLower := strings.ToLower(t.Node1)
+			tgtLower := strings.ToLower(t.Node2)
+			// If source looks like a branch name (shorter, subset of target), flip
+			if len(srcLower) < len(tgtLower) && strings.Contains(tgtLower, strings.Fields(srcLower)[0]) {
+				// Source is shorter/less specific — likely branch→network, flip
+				t.Node1, t.Node2 = t.Node2, t.Node1
+				t.Node1Type, t.Node2Type = t.Node2Type, t.Node1Type
+				return true
+			}
+		}
+		if srcBase == "person" || srcBase == "role" || srcBase == "service" {
+			return false
+		}
+
 	case "MANAGES", "MANAGED_BY":
 		// MANAGES: person → organization (or person → person for team leads)
 		// Source must be person
@@ -547,4 +586,67 @@ func looksLikePersonName(name string) bool {
 	}
 
 	return allCapitalized
+}
+
+// looksLikeHQ detects headquarters/HQ entity names that should be typed "organization" not "location".
+func looksLikeHQ(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return strings.Contains(lower, " hq") || strings.HasSuffix(lower, " hq") ||
+		strings.Contains(lower, "headquarters") || strings.Contains(lower, "head office") ||
+		strings.HasPrefix(lower, "hq ")
+}
+
+// looksLikeRoleName detects generic job/profession phrases that should be typed "role".
+// These are multi-word phrases containing role indicators but NO personal name component.
+// Examples: "diabetes educator", "mental wellness counselor", "visiting dermatologist"
+func looksLikeRoleName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return false
+	}
+
+	// Reject document/system/directory-like names — NOT roles
+	nonRoleWords := []string{"directory", "catalog", "registry", "database", "system",
+		"platform", "portal", "index", "report", "document", "manual", "guide",
+		"handbook", "protocol", "policy", "schedule", "calendar", "log", "list"}
+	for _, nrw := range nonRoleWords {
+		if strings.Contains(lower, nrw) {
+			return false
+		}
+	}
+
+	// Must contain at least one role-indicator word
+	roleIndicators := []string{
+		"officer", "manager", "director", "supervisor", "coordinator",
+		"specialist", "assistant", "administrator", "consultant", "therapist",
+		"nurse", "technician", "chief", "head", "lead", "senior", "junior",
+		"deputy", "associate", "practitioner", "surgeon", "physician", "dentist",
+		"pharmacist", "physiotherapist", "radiologist", "pathologist", "anesthetist",
+		"counselor", "counsellor", "educator", "instructor", "trainer",
+		"executive", "analyst", "engineer", "architect", "planner",
+		"dermatologist", "cardiologist", "oncologist", "neurologist", "psychologist",
+		"psychiatrist", "pediatrician", "obstetrician", "gynecologist",
+	}
+
+	hasRoleWord := false
+	for _, rw := range roleIndicators {
+		if strings.Contains(lower, rw) {
+			hasRoleWord = true
+			break
+		}
+	}
+
+	if !hasRoleWord {
+		return false
+	}
+
+	// Reject if it also looks like a named person (e.g. "Dr. John Smith" or "nurse coordinator yossi cohen")
+	// A named person typically has a proper name after the role word.
+	// Simple heuristic: if the phrase is 1-3 words and ALL are common/role words, it's a role.
+	words := strings.Fields(lower)
+	if len(words) > 4 {
+		return false
+	}
+
+	return true
 }

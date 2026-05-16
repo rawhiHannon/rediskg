@@ -27,6 +27,10 @@ type Config struct {
 	SemanticWeight    float64 // W1 for LLM-extracted edges
 	ProximityMinCount int     // minimum co-occurrence to keep proximity edge
 
+	// Schema
+	PersistSchema      bool // whether to save/load schema between runs
+	ResetSchemaOnIngest bool // if true, start fresh each ingest (ignore persisted)
+
 	// Server
 	GRPCPort string
 	HTTPPort string
@@ -46,6 +50,8 @@ func DefaultConfig() *Config {
 		Workers:            8,
 		SemanticWeight:     4.0,
 		ProximityMinCount:  3,
+		PersistSchema:      false, // off by default until quality stabilizes
+		ResetSchemaOnIngest: true,
 		GRPCPort:           "50051",
 		HTTPPort:           "8081",
 	}

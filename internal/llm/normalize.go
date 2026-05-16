@@ -48,6 +48,12 @@ Your job is to produce a NORMALIZED, CANONICAL schema by:
 - ALIAS_OF should ALWAYS be rejected — entity aliases belong in name standardization, not as graph edges.
 - HANDLES, PROCESSES, FULFILLS → group into one canonical if they mean the same thing in context
 - HAS_ROLE always means person → role. Include it as canonical even if not in candidates.
+- Parent organization ↔ owned/operated unit is NOT partnership. Use OPERATES (parent→child) or PART_OF (child→parent).
+- PARTNERS_WITH means two INDEPENDENT organizations cooperating. Internal branches/units are NEVER partners.
+- If source is a parent/network and target is an internal branch/unit, the relation is OPERATES or HAS_BRANCH, NOT PARTNERS_WITH.
+- OFFERS/PROVIDES target must always be a service or product, NEVER an organization, location, or branch.
+- HAS_AGREEMENT_WITH target must be an EXTERNAL organization, not an internal branch.
+- LOCATED_IN/LOCATED_AT target must be a location or address, source must be organization/object, NOT person.
 
 ## Output format (JSON only, no commentary):
 {

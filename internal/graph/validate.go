@@ -10,6 +10,7 @@ import (
 
 // ValidateAndNormalizeTriples normalizes relation names, applies schema-based direction
 // checks, and removes invalid triples. Uses the dynamic schema instead of hardcoded rules.
+// IMPORTANT: entityMap is READ-ONLY. Triples cannot mutate entity types.
 func ValidateAndNormalizeTriples(triples []models.Triple, entityMap map[string]string, s *schema.Schema) []models.Triple {
 	var result []models.Triple
 	flipped := 0
@@ -17,7 +18,7 @@ func ValidateAndNormalizeTriples(triples []models.Triple, entityMap map[string]s
 	rejected := 0
 
 	for _, t := range triples {
-		// Apply entity types from the validated entityMap
+		// Apply entity types from the authoritative entityMap (read-only)
 		if mapType, ok := entityMap[t.Node1]; ok && mapType != "" {
 			t.Node1Type = mapType
 		}
@@ -36,21 +37,13 @@ func ValidateAndNormalizeTriples(triples []models.Triple, entityMap map[string]s
 		t.Node1Type = strings.ToLower(strings.TrimSpace(t.Node1Type))
 		t.Node2Type = strings.ToLower(strings.TrimSpace(t.Node2Type))
 
-		// Update entity map with types from triples
-		if t.Node1Type != "" {
-			entityMap[t.Node1] = t.Node1Type
-		}
-		if t.Node2Type != "" {
-			entityMap[t.Node2] = t.Node2Type
-		}
-
 		// Skip self-referencing edges
 		if t.Node1 == t.Node2 {
 			rejected++
 			continue
 		}
 
-		// Schema-based direction validation
+		// Schema-based direction validation (strict)
 		direction := s.ValidateTripleDirection(t.Edge, t.Node1Type, t.Node2Type)
 		switch direction {
 		case "flip":
@@ -140,71 +133,9 @@ func ApplyVerification(triples []models.Triple, removals []string, modifications
 	return result
 }
 
-// PropagateTypesFromTriples infers entity types from how entities are used in relations,
-// using the schema's relation type definitions as the source of truth.
-func PropagateTypesFromTriples(triples []models.Triple, entityMap map[string]string, s *schema.Schema) {
-	votes := map[string]map[string]int{}
-	addVote := func(entity, typ string) {
-		if entity == "" || typ == "" {
-			return
-		}
-		if votes[entity] == nil {
-			votes[entity] = map[string]int{}
-		}
-		votes[entity][typ]++
-	}
-
-	for _, t := range triples {
-		rt := s.GetRelationType(t.Edge)
-		if rt == nil {
-			continue
-		}
-		// If a relation has exactly one expected source type, vote for it
-		if len(rt.SourceTypes) == 1 {
-			addVote(t.Node1, rt.SourceTypes[0])
-		}
-		if len(rt.TargetTypes) == 1 {
-			addVote(t.Node2, rt.TargetTypes[0])
-		}
-	}
-
-	propagated := 0
-	for entity, typeCounts := range votes {
-		currentType := entityMap[entity]
-
-		bestType := ""
-		bestCount := 0
-		for t, count := range typeCounts {
-			if count > bestCount {
-				bestType = t
-				bestCount = count
-			}
-		}
-		if bestType == "" {
-			continue
-		}
-
-		// Fill missing types unconditionally
-		if currentType == "" {
-			entityMap[entity] = bestType
-			propagated++
-			continue
-		}
-
-		// Override only with strong evidence (2+ votes)
-		if currentType != bestType && bestCount >= 2 {
-			entityMap[entity] = bestType
-			propagated++
-		}
-	}
-
-	if propagated > 0 {
-		log.Printf("Type propagation: inferred %d entity types from graph structure", propagated)
-	}
-}
 
 // NormalizeRelation converts a raw relation string to a canonical form.
-// Truncates overly verbose names (4+ words) to keep relations generic.
+// Does NOT truncate — schema normalization decides aliases/rejects for verbose names.
 func NormalizeRelation(edge string) string {
 	trimmed := strings.TrimSpace(edge)
 	if trimmed == "" {
@@ -212,14 +143,7 @@ func NormalizeRelation(edge string) string {
 	}
 	underscored := strings.ReplaceAll(trimmed, " ", "_")
 	underscored = strings.ReplaceAll(underscored, "-", "_")
-	upper := strings.ToUpper(underscored)
-
-	// Truncate overly verbose relation names to first 3 words
-	parts := strings.Split(upper, "_")
-	if len(parts) > 3 {
-		upper = strings.Join(parts[:3], "_")
-	}
-	return upper
+	return strings.ToUpper(underscored)
 }
 
 // deduplicateSymmetricFromSchema removes inverse duplicates for symmetric relations
@@ -254,6 +178,73 @@ func deduplicateSymmetricFromSchema(triples []models.Triple, s *schema.Schema) [
 
 func tripleKey(t models.Triple) string {
 	return strings.ToLower(t.Node1) + "|" + strings.ToUpper(t.Edge) + "|" + strings.ToLower(t.Node2)
+}
+
+// DeduplicateEndpointVariants merges entity name variants that differ only by
+// trivial suffixes (trailing 's', 'es', 'ing') when they appear in the same
+// relation context. This is domain-agnostic pluralization dedup.
+func DeduplicateEndpointVariants(triples []models.Triple) []models.Triple {
+	// Collect all unique endpoint names
+	names := map[string]int{} // name → occurrence count
+	for _, t := range triples {
+		names[strings.ToLower(t.Node1)]++
+		names[strings.ToLower(t.Node2)]++
+	}
+
+	// Build canonical mapping: shorter/more-common form wins
+	canonMap := map[string]string{}
+	for name := range names {
+		// Check if plural form exists
+		variants := []string{
+			name + "s",    // service → services
+			name + "es",   // match → matches
+			name + "ies",  // but skip complex suffix rules
+		}
+		for _, v := range variants {
+			if _, ok := names[v]; ok {
+				// Both exist — keep the more frequent one
+				if names[name] >= names[v] {
+					canonMap[v] = name
+				} else {
+					canonMap[name] = v
+				}
+			}
+		}
+		// Check if this IS a plural and the singular exists
+		if strings.HasSuffix(name, "s") && !strings.HasSuffix(name, "ss") {
+			singular := name[:len(name)-1]
+			if _, ok := names[singular]; ok {
+				if names[singular] >= names[name] {
+					canonMap[name] = singular
+				} else {
+					canonMap[singular] = name
+				}
+			}
+		}
+	}
+
+	if len(canonMap) == 0 {
+		return triples
+	}
+
+	normalized := 0
+	result := make([]models.Triple, len(triples))
+	for i, t := range triples {
+		result[i] = t
+		if canon, ok := canonMap[strings.ToLower(t.Node1)]; ok {
+			result[i].Node1 = canon
+			normalized++
+		}
+		if canon, ok := canonMap[strings.ToLower(t.Node2)]; ok {
+			result[i].Node2 = canon
+			normalized++
+		}
+	}
+
+	if normalized > 0 {
+		log.Printf("Endpoint variant dedup: normalized %d endpoint references", normalized)
+	}
+	return result
 }
 
 // ResolveConflicts removes weaker/redundant triples when stronger alternatives exist.
@@ -305,6 +296,50 @@ func ResolveConflicts(triples []models.Triple) []models.Triple {
 					key := src + "|" + edge + "|" + tgt
 					removeKeys[key] = true
 				}
+			}
+		}
+	}
+
+	// Network rollup detection: if a branch OFFERS service X and the parent network
+	// also OFFERS service X, the network-level edge is redundant (keep branch-level)
+	// Build: service → set of organizations that offer it
+	serviceOfferers := map[string][]string{} // service → list of orgs offering it
+	for _, t := range triples {
+		if strings.ToUpper(t.Edge) == "OFFERS" || strings.ToUpper(t.Edge) == "PROVIDES" {
+			svc := strings.ToLower(t.Node2)
+			serviceOfferers[svc] = append(serviceOfferers[svc], strings.ToLower(t.Node1))
+		}
+	}
+	// Build: child → parent from OPERATES/PART_OF
+	childParent := map[string]string{}
+	for _, t := range triples {
+		edge := strings.ToUpper(t.Edge)
+		if edge == "OPERATES" || edge == "HAS_BRANCH" {
+			// parent → child
+			childParent[strings.ToLower(t.Node2)] = strings.ToLower(t.Node1)
+		} else if edge == "PART_OF" || edge == "BELONGS_TO" {
+			// child → parent
+			childParent[strings.ToLower(t.Node1)] = strings.ToLower(t.Node2)
+		}
+	}
+	// Mark network-level OFFERS as redundant if any child also OFFERS same service
+	for _, t := range triples {
+		edge := strings.ToUpper(t.Edge)
+		if edge != "OFFERS" && edge != "PROVIDES" {
+			continue
+		}
+		src := strings.ToLower(t.Node1)
+		svc := strings.ToLower(t.Node2)
+		// Check if src is a parent of any other offerer of the same service
+		for _, otherOrg := range serviceOfferers[svc] {
+			if otherOrg == src {
+				continue
+			}
+			if childParent[otherOrg] == src {
+				// src is parent, otherOrg (child) also offers this service → parent is redundant
+				key := src + "|" + edge + "|" + svc
+				removeKeys[key] = true
+				break
 			}
 		}
 	}

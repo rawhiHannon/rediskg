@@ -391,11 +391,18 @@ func (s *Schema) ValidateTripleDirection(relName, sourceType, targetType string)
 		// Check alias resolution
 		rt = s.GetRelationType(relName)
 		if rt == nil {
-			return "ok" // unknown relation, allow through
+			// Unknown relation — reject. Schema normalization should have defined all valid relations.
+			return "invalid"
 		}
 	}
 
+	// Missing types — cannot validate, reject to avoid pollution
 	if sourceType == "" || targetType == "" {
+		return "invalid"
+	}
+
+	// If schema has no constraints defined, allow through
+	if len(rt.SourceTypes) == 0 && len(rt.TargetTypes) == 0 {
 		return "ok"
 	}
 
@@ -413,15 +420,6 @@ func (s *Schema) ValidateTripleDirection(relName, sourceType, targetType string)
 		return "flip"
 	}
 
-	if sourceOK || targetOK {
-		return "ok"
-	}
-
-	// Be permissive with few observations
-	if len(rt.SourceTypes) < 3 || len(rt.TargetTypes) < 3 {
-		return "ok"
-	}
-
 	return "invalid"
 }
 
@@ -437,11 +435,20 @@ func (s *Schema) IsTypeCompatible(entityType string, allowed []string) bool {
 			return true
 		}
 	}
-	// Check parent type
-	if et, ok := s.EntityTypes[entityType]; ok && et.ParentType != "" {
-		for _, a := range allowed {
-			if a == et.ParentType {
-				return true
+	// Check parent type and base types
+	if et, ok := s.EntityTypes[entityType]; ok {
+		if et.ParentType != "" {
+			for _, a := range allowed {
+				if a == et.ParentType {
+					return true
+				}
+			}
+		}
+		for _, bt := range et.BaseTypes {
+			for _, a := range allowed {
+				if a == bt {
+					return true
+				}
 			}
 		}
 	}
@@ -450,6 +457,23 @@ func (s *Schema) IsTypeCompatible(entityType string, allowed []string) bool {
 		for _, a := range allowed {
 			if a == canonical {
 				return true
+			}
+		}
+		// Also check the canonical type's parent/base
+		if et, ok := s.EntityTypes[canonical]; ok {
+			if et.ParentType != "" {
+				for _, a := range allowed {
+					if a == et.ParentType {
+						return true
+					}
+				}
+			}
+			for _, bt := range et.BaseTypes {
+				for _, a := range allowed {
+					if a == bt {
+						return true
+					}
+				}
 			}
 		}
 	}

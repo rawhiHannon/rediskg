@@ -56,11 +56,13 @@ func (p *Pipeline) IngestText(text, source string) error {
 }
 
 func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
-	// Phase 0: Initialize schema with base types + load persisted schema
+	// Phase 0: Initialize schema with base types + optionally load persisted schema
 	log.Println("Initializing schema...")
 	p.schema.InitWithBaseTypes()
-	p.loadSchema()
-	log.Printf("Schema loaded: %d entity types, %d relation types",
+	if p.cfg.PersistSchema && !p.cfg.ResetSchemaOnIngest {
+		p.loadSchema()
+	}
+	log.Printf("Schema initialized: %d entity types, %d relation types",
 		len(p.schema.EntityTypeNames()), len(p.schema.RelationTypeNames()))
 
 	// Phase 1: Chunk documents
@@ -95,12 +97,23 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 	log.Println("Running global schema normalization...")
 	p.globalSchemaNormalization(allEntities, allTriples)
 
+	// Phase 6b: Collect and apply alias endpoint mappings from ALIAS_OF triples
+	// ALIAS_OF edges contain alias→canonical info that must be applied before removal
+	aliasMappings := collectAliasEndpoints(allTriples, allEntities)
+	if len(aliasMappings) > 0 {
+		log.Printf("Applying %d alias endpoint rewrites from ALIAS_OF triples", len(aliasMappings))
+		allTriples = graph.ApplyStandardization(allTriples, aliasMappings)
+		allEntities = graph.ApplyStandardizationToEntities(allEntities, aliasMappings)
+	}
+
 	// Phase 7: Schema rewrite — deterministically apply normalization to entities
 	log.Println("Rewriting entities with normalized schema...")
 	allEntities = p.schema.RewriteEntities(allEntities)
 
-	// Build the authoritative entity type map from rewritten entities
-	entityMap := buildEntityMap(allEntities)
+	// Build the AUTHORITATIVE entity type map from rewritten entities.
+	// Once built, this map is frozen — triples cannot mutate it.
+	entityTypeMap := buildEntityTypeMap(allEntities)
+	entityMap := entityTypeMapToFlat(entityTypeMap)
 
 	// Phase 8: Schema rewrite — deterministically apply normalization to triples
 	// Resolves aliases, flips inverses, validates base-type constraints, rejects bad triples
@@ -111,19 +124,29 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 	log.Println("Validating triples against schema...")
 	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap, p.schema)
 
-	// Phase 9b: Propagate types from validated relations
-	graph.PropagateTypesFromTriples(allTriples, entityMap, p.schema)
-
 	// Phase 10: Rich-context verification (LLM verifies with profiles + evidence)
 	log.Println("Verifying triples with evidence...")
 	allTriples = p.verifyTriplesRich(allTriples, profiles)
 
-	// Phase 10b: Conflict resolution — remove weaker facts when stronger exist
+	// Phase 10b: Re-run schema compiler after LLM verification
+	// Verification can modify triples — revalidate against schema
+	log.Println("Re-validating triples after verification...")
+	allTriples = p.schema.RewriteTriples(allTriples, entityMap)
+	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap, p.schema)
+
+	// Phase 10c: Contextual enforcement — status-aware and role-aware checks
+	log.Println("Applying contextual enforcement (planned entities, deputy roles)...")
+	allTriples = applyContextualEnforcement(allTriples, profiles, entityTypeMap)
+
+	// Phase 10d: Endpoint variant dedup (domain-agnostic pluralization merging)
+	allTriples = graph.DeduplicateEndpointVariants(allTriples)
+
+	// Phase 10e: Conflict resolution — remove weaker facts when stronger exist
 	log.Println("Resolving conflicting/redundant triples...")
 	allTriples = graph.ResolveConflicts(allTriples)
 
 	// Phase 11: Merge entities into final form
-	mergedEntities := mergeEntities(allEntities, entityMap)
+	mergedEntities := mergeEntities(allEntities, entityTypeMap)
 	log.Printf("Merged to %d unique entities", len(mergedEntities))
 
 	// Phase 12: Merge duplicate edges
@@ -143,10 +166,12 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 		return fmt.Errorf("failed to store graph: %w", err)
 	}
 
-	// Phase 15: Persist schema
-	log.Println("Persisting schema...")
-	if err := p.saveSchema(); err != nil {
-		log.Printf("Warning: schema persistence failed: %v", err)
+	// Phase 15: Persist schema (if enabled)
+	if p.cfg.PersistSchema {
+		log.Println("Persisting schema...")
+		if err := p.saveSchema(); err != nil {
+			log.Printf("Warning: schema persistence failed: %v", err)
+		}
 	}
 
 	// Phase 16: Generate embeddings
@@ -331,21 +356,36 @@ func (p *Pipeline) fallbackHeuristicGovernance(entities []models.Entity, triples
 	log.Printf("Fallback governance: %d type aliases, %d relation aliases auto-accepted", accepted, relAccepted)
 }
 
-// buildEntityMap creates a name→type lookup from all extracted entities (majority vote).
-func buildEntityMap(entities []models.Entity) map[string]string {
-	votes := map[string]map[string]int{}
+// EntityTypeInfo holds the resolved type information for an entity after schema normalization.
+type EntityTypeInfo struct {
+	Type       string // resolved type (may be base or domain type)
+	BaseType   string // universal scaffold type (person, organization, etc.)
+	DomainType string // domain-specific subtype (clinic_branch, etc.)
+}
+
+// buildEntityTypeMap creates a name→EntityTypeInfo lookup from rewritten entities (majority vote).
+// This is the AUTHORITATIVE type source — once built, it should not be mutated by triples.
+func buildEntityTypeMap(entities []models.Entity) map[string]*EntityTypeInfo {
+	type voteEntry struct {
+		typ        string
+		baseType   string
+		domainType string
+	}
+	votes := map[string][]voteEntry{}
 	for _, e := range entities {
 		if e.Name == "" || e.Type == "" {
 			continue
 		}
-		if votes[e.Name] == nil {
-			votes[e.Name] = map[string]int{}
-		}
-		votes[e.Name][e.Type]++
+		votes[e.Name] = append(votes[e.Name], voteEntry{e.Type, e.BaseType, e.DomainType})
 	}
 
-	result := map[string]string{}
-	for name, typeCounts := range votes {
+	result := map[string]*EntityTypeInfo{}
+	for name, entries := range votes {
+		// Majority vote on type
+		typeCounts := map[string]int{}
+		for _, v := range entries {
+			typeCounts[v.typ]++
+		}
 		bestType := ""
 		bestCount := 0
 		for t, count := range typeCounts {
@@ -354,7 +394,35 @@ func buildEntityMap(entities []models.Entity) map[string]string {
 				bestCount = count
 			}
 		}
-		result[name] = bestType
+
+		// Use the first entry with that type for base/domain info
+		info := &EntityTypeInfo{Type: bestType}
+		for _, v := range entries {
+			if v.typ == bestType {
+				if v.baseType != "" {
+					info.BaseType = v.baseType
+				}
+				if v.domainType != "" {
+					info.DomainType = v.domainType
+				}
+				break
+			}
+		}
+		// If base type is still empty, fall back to the type itself if it's a base type
+		if info.BaseType == "" {
+			info.BaseType = info.Type
+		}
+		result[name] = info
+	}
+	return result
+}
+
+// entityTypeMapToFlat converts rich EntityTypeInfo map to flat map[string]string for
+// backward-compatible functions that only need the type name.
+func entityTypeMapToFlat(infoMap map[string]*EntityTypeInfo) map[string]string {
+	result := make(map[string]string, len(infoMap))
+	for name, info := range infoMap {
+		result[name] = info.Type
 	}
 	return result
 }
@@ -454,7 +522,7 @@ func (p *Pipeline) standardizeEntities(triples []models.Triple, entities []model
 }
 
 // mergeEntities deduplicates entities by name, merging properties and using the validated type.
-func mergeEntities(entities []models.Entity, entityMap map[string]string) []models.Entity {
+func mergeEntities(entities []models.Entity, entityTypeMap map[string]*EntityTypeInfo) []models.Entity {
 	merged := map[string]*models.Entity{}
 
 	for _, e := range entities {
@@ -463,9 +531,18 @@ func mergeEntities(entities []models.Entity, entityMap map[string]string) []mode
 		}
 		existing, ok := merged[e.Name]
 		if !ok {
-			typ := entityMap[e.Name]
-			if typ == "" {
-				typ = e.Type
+			// Use authoritative type info from the frozen entityTypeMap
+			typ := e.Type
+			baseType := e.BaseType
+			domainType := e.DomainType
+			if info, ok := entityTypeMap[e.Name]; ok {
+				typ = info.Type
+				if info.BaseType != "" {
+					baseType = info.BaseType
+				}
+				if info.DomainType != "" {
+					domainType = info.DomainType
+				}
 			}
 			props := map[string]interface{}{}
 			for k, v := range e.Properties {
@@ -476,8 +553,8 @@ func mergeEntities(entities []models.Entity, entityMap map[string]string) []mode
 			merged[e.Name] = &models.Entity{
 				Name:       e.Name,
 				Type:       typ,
-				BaseType:   e.BaseType,
-				DomainType: e.DomainType,
+				BaseType:   baseType,
+				DomainType: domainType,
 				Properties: props,
 			}
 			continue
@@ -636,6 +713,236 @@ func splitCSV(s string) []string {
 		}
 	}
 	return result
+}
+
+// applyContextualEnforcement applies status-aware and role-aware checks using entity profiles.
+// - Planned/future entities cannot have active relations (OPERATES, OFFERS, HAS_CLINICIAN, WORKS_AT)
+// - Entities with deputy manager role cannot have MANAGES relation (convert or reject)
+func applyContextualEnforcement(triples []models.Triple, profiles map[string]*models.EntityProfile, entityTypeMap map[string]*EntityTypeInfo) []models.Triple {
+	// Detect planned entities from profiles (mentions containing "planned", "future", "upcoming", "expected")
+	plannedEntities := map[string]bool{}
+	for name, prof := range profiles {
+		if isPlannedEntity(prof) {
+			plannedEntities[name] = true
+		}
+	}
+
+	// Detect deputy entities: entities that have "deputy" in their HAS_ROLE targets
+	// We detect these from the triples themselves
+	deputyPersons := map[string]bool{}
+	for _, t := range triples {
+		if strings.ToUpper(t.Edge) == "HAS_ROLE" {
+			targetLower := strings.ToLower(t.Node2)
+			if strings.Contains(targetLower, "deputy") || strings.Contains(targetLower, "acting") || strings.Contains(targetLower, "interim") {
+				deputyPersons[t.Node1] = true
+			}
+		}
+	}
+
+	// Active relations that planned entities cannot have
+	activeRelations := map[string]bool{
+		"OPERATES": true, "OFFERS": true, "PROVIDES": true,
+		"HAS_CLINICIAN": true, "WORKS_AT": true, "BASED_AT": true,
+		"MANAGES": true, "MANAGED_BY": true,
+	}
+
+	// Allowed relations for planned entities
+	// (everything else is rejected)
+
+	result := make([]models.Triple, 0, len(triples))
+	plannedRejected := 0
+	deputyFixed := 0
+
+	for _, t := range triples {
+		edge := strings.ToUpper(t.Edge)
+
+		// Check if either endpoint is a planned entity with an active relation
+		if activeRelations[edge] {
+			if plannedEntities[t.Node1] || plannedEntities[t.Node2] {
+				plannedRejected++
+				continue
+			}
+		}
+
+		// Check if source is a deputy person trying to MANAGES
+		if edge == "MANAGES" && deputyPersons[t.Node1] {
+			// Convert MANAGES to HAS_DEPUTY_MANAGER (flipped direction: org -> person)
+			t.Edge = "HAS_DEPUTY_MANAGER"
+			t.Node1, t.Node2 = t.Node2, t.Node1
+			t.Node1Type, t.Node2Type = t.Node2Type, t.Node1Type
+			deputyFixed++
+		}
+
+		result = append(result, t)
+	}
+
+	if plannedRejected > 0 || deputyFixed > 0 {
+		log.Printf("Contextual enforcement: rejected %d planned-entity triples, fixed %d deputy->MANAGES", plannedRejected, deputyFixed)
+	}
+
+	// BASED_AT limiter: if a person has multiple BASED_AT, keep only the first (most evidenced)
+	// and convert others to VISITS (since BASED_AT should mean primary location)
+	result = limitBasedAt(result, entityTypeMap)
+
+	return result
+}
+
+// limitBasedAt ensures each person has at most one BASED_AT relation.
+// Additional BASED_AT edges are converted to VISITS.
+func limitBasedAt(triples []models.Triple, entityTypeMap map[string]*EntityTypeInfo) []models.Triple {
+	// Count BASED_AT per person
+	basedAtCount := map[string]int{}
+	for _, t := range triples {
+		if strings.ToUpper(t.Edge) == "BASED_AT" {
+			info := entityTypeMap[t.Node1]
+			if info != nil && info.BaseType == "person" {
+				basedAtCount[t.Node1]++
+			}
+		}
+	}
+
+	// If any person has >1 BASED_AT, keep first occurrence only
+	converted := 0
+	basedAtSeen := map[string]bool{} // person → already has one BASED_AT
+	result := make([]models.Triple, len(triples))
+	for i, t := range triples {
+		result[i] = t
+		if strings.ToUpper(t.Edge) == "BASED_AT" && basedAtCount[t.Node1] > 1 {
+			if basedAtSeen[t.Node1] {
+				// Already has one BASED_AT — convert this to VISITS
+				result[i].Edge = "VISITS"
+				converted++
+			} else {
+				basedAtSeen[t.Node1] = true
+			}
+		}
+	}
+
+	if converted > 0 {
+		log.Printf("BASED_AT limiter: converted %d extra BASED_AT to VISITS", converted)
+	}
+	return result
+}
+
+// isPlannedEntity detects whether an entity is planned/future from its profile evidence.
+func isPlannedEntity(prof *models.EntityProfile) bool {
+	if prof == nil {
+		return false
+	}
+	plannedKeywords := []string{"planned", "future", "upcoming", "expected opening", "under construction", "not yet open", "will open", "scheduled to open"}
+	// Check description
+	lower := strings.ToLower(prof.Description)
+	for _, kw := range plannedKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	// Check mentions
+	for _, m := range prof.Mentions {
+		ml := strings.ToLower(m)
+		for _, kw := range plannedKeywords {
+			if strings.Contains(ml, kw) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// collectAliasEndpoints extracts alias groups from ALIAS_OF triples and picks the
+// best canonical name using a scoring function. Returns alias→canonical mappings.
+func collectAliasEndpoints(triples []models.Triple, entities []models.Entity) map[string]string {
+	// Collect alias pairs (direction-agnostic — we'll score to pick canonical)
+	type pair struct{ a, b string }
+	pairs := []pair{}
+	for _, t := range triples {
+		if strings.ToUpper(t.Edge) == "ALIAS_OF" && t.Node1 != "" && t.Node2 != "" && t.Node1 != t.Node2 {
+			pairs = append(pairs, pair{t.Node1, t.Node2})
+		}
+	}
+
+	if len(pairs) == 0 {
+		return nil
+	}
+
+	// Build alias groups using union-find style grouping
+	canonical := map[string]string{} // name → group representative
+	for _, p := range pairs {
+		// Find existing groups
+		groupA := resolveCanonical(canonical, p.a)
+		groupB := resolveCanonical(canonical, p.b)
+		if groupA == groupB {
+			continue
+		}
+		// Score both to pick the better canonical
+		if canonicalScore(groupA, entities) >= canonicalScore(groupB, entities) {
+			canonical[groupB] = groupA
+		} else {
+			canonical[groupA] = groupB
+		}
+	}
+
+	// Flatten: build alias→canonical map
+	mappings := map[string]string{}
+	for name := range canonical {
+		canon := resolveCanonical(canonical, name)
+		if canon != name {
+			mappings[name] = canon
+		}
+	}
+
+	return mappings
+}
+
+// resolveCanonical follows the chain to find the ultimate canonical name.
+func resolveCanonical(m map[string]string, name string) string {
+	visited := map[string]bool{}
+	current := name
+	for {
+		next, ok := m[current]
+		if !ok || next == current || visited[current] {
+			return current
+		}
+		visited[current] = true
+		current = next
+	}
+}
+
+// canonicalScore scores a name for canonical-ness. Higher = better canonical.
+func canonicalScore(name string, entities []models.Entity) int {
+	score := 0
+	lower := strings.ToLower(name)
+
+	// Prefer longer names (more specific)
+	score += len(name)
+
+	// Prefer names with brand/network prefix (e.g. "cedargate haifa central" > "haifa central")
+	words := strings.Fields(name)
+	if len(words) >= 3 {
+		score += 20
+	}
+
+	// Prefer names that appear as entities with a non-alias type
+	for _, e := range entities {
+		if strings.ToLower(e.Name) == lower {
+			if e.Type != "" && e.Type != "alias" {
+				score += 30
+			}
+			break
+		}
+	}
+
+	// Penalize very short names (likely abbreviations)
+	if len(name) < 10 {
+		score -= 10
+	}
+
+	// Penalize names that are just a generic location-like word
+	if len(words) <= 2 {
+		score -= 5
+	}
+
+	return score
 }
 
 func deduplicateStrings(ss []string) []string {
