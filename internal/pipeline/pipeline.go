@@ -141,13 +141,21 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 	// Phase 10d: Endpoint variant dedup (domain-agnostic pluralization merging)
 	allTriples = graph.DeduplicateEndpointVariants(allTriples)
 
-	// Phase 10e: Conflict resolution — remove weaker facts when stronger exist
+	// Phase 10e: Re-run schema validation after dedup (dedup can create new type mismatches)
+	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap, p.schema)
+
+	// Phase 10f: Conflict resolution — remove weaker facts when stronger exist
 	log.Println("Resolving conflicting/redundant triples...")
 	allTriples = graph.ResolveConflicts(allTriples)
 
-	// Phase 11: Merge entities into final form
-	mergedEntities := mergeEntities(allEntities, entityTypeMap)
-	log.Printf("Merged to %d unique entities", len(mergedEntities))
+	// Phase 10g: Final canonical endpoint rewrite — guarantee all endpoints use canonical names
+	if len(aliasMappings) > 0 {
+		allTriples = graph.ApplyStandardization(allTriples, aliasMappings)
+	}
+
+	// Phase 11: Build final entity list from compiled graph endpoints only
+	mergedEntities := buildEntitiesFromGraph(allTriples, entityTypeMap)
+	log.Printf("Final entity set: %d entities (from graph endpoints)", len(mergedEntities))
 
 	// Phase 12: Merge duplicate edges
 	log.Println("Merging edges...")
@@ -521,67 +529,33 @@ func (p *Pipeline) standardizeEntities(triples []models.Triple, entities []model
 	return triples, entities, nil
 }
 
-// mergeEntities deduplicates entities by name, merging properties and using the validated type.
-func mergeEntities(entities []models.Entity, entityTypeMap map[string]*EntityTypeInfo) []models.Entity {
-	merged := map[string]*models.Entity{}
 
-	for _, e := range entities {
-		if e.Name == "" {
-			continue
+// buildEntitiesFromGraph creates the final entity list from compiled graph endpoints only.
+// Only entities that actually appear as triple endpoints make it into the final graph.
+func buildEntitiesFromGraph(triples []models.Triple, entityTypeMap map[string]*EntityTypeInfo) []models.Entity {
+	// Collect all unique endpoints from the compiled triples
+	endpoints := map[string]bool{}
+	for _, t := range triples {
+		if t.Node1 != "" {
+			endpoints[t.Node1] = true
 		}
-		existing, ok := merged[e.Name]
-		if !ok {
-			// Use authoritative type info from the frozen entityTypeMap
-			typ := e.Type
-			baseType := e.BaseType
-			domainType := e.DomainType
-			if info, ok := entityTypeMap[e.Name]; ok {
-				typ = info.Type
-				if info.BaseType != "" {
-					baseType = info.BaseType
-				}
-				if info.DomainType != "" {
-					domainType = info.DomainType
-				}
-			}
-			props := map[string]interface{}{}
-			for k, v := range e.Properties {
-				if k != "evidence" { // don't store raw evidence in entity properties
-					props[k] = v
-				}
-			}
-			merged[e.Name] = &models.Entity{
-				Name:       e.Name,
-				Type:       typ,
-				BaseType:   baseType,
-				DomainType: domainType,
-				Properties: props,
-			}
-			continue
-		}
-		for k, v := range e.Properties {
-			if k == "evidence" {
-				continue
-			}
-			if k == "description" {
-				if existDesc, ok := existing.Properties["description"].(string); ok {
-					newDesc, _ := v.(string)
-					if newDesc != "" && !strings.Contains(existDesc, newDesc) {
-						existing.Properties["description"] = existDesc + " " + newDesc
-					}
-				} else {
-					existing.Properties[k] = v
-				}
-			} else {
-				existing.Properties[k] = v
-			}
+		if t.Node2 != "" {
+			endpoints[t.Node2] = true
 		}
 	}
 
-	result := make([]models.Entity, 0, len(merged))
-	for _, e := range merged {
-		result = append(result, *e)
+	// Build entities with authoritative type info
+	result := make([]models.Entity, 0, len(endpoints))
+	for name := range endpoints {
+		e := models.Entity{Name: name}
+		if info, ok := entityTypeMap[name]; ok {
+			e.Type = info.Type
+			e.BaseType = info.BaseType
+			e.DomainType = info.DomainType
+		}
+		result = append(result, e)
 	}
+
 	return result
 }
 
@@ -742,7 +716,7 @@ func applyContextualEnforcement(triples []models.Triple, profiles map[string]*mo
 	// Active relations that planned entities cannot have
 	activeRelations := map[string]bool{
 		"OPERATES": true, "OFFERS": true, "PROVIDES": true,
-		"HAS_CLINICIAN": true, "WORKS_AT": true, "BASED_AT": true,
+		"WORKS_AT": true, "BASED_AT": true,
 		"MANAGES": true, "MANAGED_BY": true,
 	}
 
@@ -788,39 +762,62 @@ func applyContextualEnforcement(triples []models.Triple, profiles map[string]*mo
 }
 
 // limitBasedAt ensures each person has at most one BASED_AT relation.
-// Additional BASED_AT edges are converted to VISITS.
+// Keeps the best-evidenced BASED_AT (by weight, then evidence length) and converts others to VISITS.
 func limitBasedAt(triples []models.Triple, entityTypeMap map[string]*EntityTypeInfo) []models.Triple {
-	// Count BASED_AT per person
-	basedAtCount := map[string]int{}
-	for _, t := range triples {
+	// Collect BASED_AT indices per person
+	type basedAtEntry struct {
+		index    int
+		weight   float64
+		evidence int // length of evidence string as quality proxy
+	}
+	personBasedAt := map[string][]basedAtEntry{}
+	for i, t := range triples {
 		if strings.ToUpper(t.Edge) == "BASED_AT" {
 			info := entityTypeMap[t.Node1]
 			if info != nil && info.BaseType == "person" {
-				basedAtCount[t.Node1]++
+				personBasedAt[t.Node1] = append(personBasedAt[t.Node1], basedAtEntry{
+					index:    i,
+					weight:   t.Weight,
+					evidence: len(t.Evidence),
+				})
 			}
 		}
 	}
 
-	// If any person has >1 BASED_AT, keep first occurrence only
-	converted := 0
-	basedAtSeen := map[string]bool{} // person → already has one BASED_AT
+	// For persons with multiple BASED_AT, find the best one and convert the rest
+	convertIndices := map[int]bool{}
+	for _, entries := range personBasedAt {
+		if len(entries) <= 1 {
+			continue
+		}
+		// Pick best: highest weight, tie-break by evidence length
+		bestIdx := 0
+		for i := 1; i < len(entries); i++ {
+			if entries[i].weight > entries[bestIdx].weight ||
+				(entries[i].weight == entries[bestIdx].weight && entries[i].evidence > entries[bestIdx].evidence) {
+				bestIdx = i
+			}
+		}
+		for i, e := range entries {
+			if i != bestIdx {
+				convertIndices[e.index] = true
+			}
+		}
+	}
+
+	if len(convertIndices) == 0 {
+		return triples
+	}
+
 	result := make([]models.Triple, len(triples))
 	for i, t := range triples {
 		result[i] = t
-		if strings.ToUpper(t.Edge) == "BASED_AT" && basedAtCount[t.Node1] > 1 {
-			if basedAtSeen[t.Node1] {
-				// Already has one BASED_AT — convert this to VISITS
-				result[i].Edge = "VISITS"
-				converted++
-			} else {
-				basedAtSeen[t.Node1] = true
-			}
+		if convertIndices[i] {
+			result[i].Edge = "VISITS"
 		}
 	}
 
-	if converted > 0 {
-		log.Printf("BASED_AT limiter: converted %d extra BASED_AT to VISITS", converted)
-	}
+	log.Printf("BASED_AT limiter: converted %d extra BASED_AT to VISITS (evidence-ranked)", len(convertIndices))
 	return result
 }
 

@@ -218,7 +218,7 @@ func (s *Schema) ApplyNormalization(norm *SchemaNormalization) {
 		for _, rej := range rule.RejectAliases {
 			rej = strings.ToUpper(rej)
 			s.mu.Lock()
-			s.relationAliases[rej] = "__REJECTED__"
+			s.relationAliases[rej] = RelationAliasInfo{Canonical: "__REJECTED__", Flip: false}
 			s.mu.Unlock()
 		}
 	}
@@ -227,7 +227,7 @@ func (s *Schema) ApplyNormalization(norm *SchemaNormalization) {
 	for _, rej := range norm.RejectedRelations {
 		rel := strings.ToUpper(rej.Relation)
 		s.mu.Lock()
-		s.relationAliases[rel] = "__REJECTED__"
+		s.relationAliases[rel] = RelationAliasInfo{Canonical: "__REJECTED__", Flip: false}
 		s.mu.Unlock()
 	}
 
@@ -396,8 +396,8 @@ func (s *Schema) RewriteTriples(triples []models.Triple, entityMap map[string]st
 						t.Node1, t.Node2 = t.Node2, t.Node1
 						t.Node1Type, t.Node2Type = t.Node2Type, t.Node1Type
 						flipped++
-					} else if !srcOK && !tgtOK {
-						// Both sides wrong — reject
+					} else {
+						// Either side violates and flip doesn't fix — reject
 						rejected++
 						continue
 					}

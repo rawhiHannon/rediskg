@@ -49,6 +49,12 @@ type CandidateRelation struct {
 	Confidence         float64  `json:"confidence"`
 }
 
+// RelationAliasInfo holds alias metadata including whether direction should flip.
+type RelationAliasInfo struct {
+	Canonical string
+	Flip      bool
+}
+
 // Schema holds the dynamically-built knowledge graph schema with governance layers.
 type Schema struct {
 	mu            sync.RWMutex
@@ -57,8 +63,8 @@ type Schema struct {
 	RelationTypes map[string]*RelationType // accepted relation name → definition
 
 	// Alias indexes for fast lookup during normalization
-	typeAliases     map[string]string // alias → canonical type name
-	relationAliases map[string]string // alias → canonical relation name
+	typeAliases     map[string]string              // alias → canonical type name
+	relationAliases map[string]RelationAliasInfo   // alias → {canonical, flip}
 
 	// Candidate queues (proposed but not yet accepted)
 	pendingTypes     []CandidateType
@@ -72,7 +78,7 @@ func New() *Schema {
 		EntityTypes:     map[string]*EntityType{},
 		RelationTypes:   map[string]*RelationType{},
 		typeAliases:     map[string]string{},
-		relationAliases: map[string]string{},
+		relationAliases: map[string]RelationAliasInfo{},
 	}
 }
 
@@ -108,10 +114,10 @@ func (s *Schema) AddRelationType(rt RelationType) {
 	s.RelationTypes[rt.Name] = &rt
 	// Register aliases
 	for _, alias := range rt.Aliases {
-		s.relationAliases[strings.ToUpper(alias)] = rt.Name
+		s.relationAliases[strings.ToUpper(alias)] = RelationAliasInfo{Canonical: rt.Name, Flip: false}
 	}
 	if rt.InverseOf != "" {
-		s.relationAliases[strings.ToUpper(rt.InverseOf)] = rt.Name
+		s.relationAliases[strings.ToUpper(rt.InverseOf)] = RelationAliasInfo{Canonical: rt.Name, Flip: true}
 	}
 }
 
@@ -148,8 +154,8 @@ func (s *Schema) GetRelationType(name string) *RelationType {
 	if rt, ok := s.RelationTypes[name]; ok {
 		return rt
 	}
-	if canonical, ok := s.relationAliases[name]; ok {
-		return s.RelationTypes[canonical]
+	if info, ok := s.relationAliases[name]; ok {
+		return s.RelationTypes[info.Canonical]
 	}
 	return nil
 }
@@ -193,8 +199,8 @@ func (s *Schema) ResolveRelationName(name string) string {
 	if _, ok := s.RelationTypes[name]; ok {
 		return name
 	}
-	if canonical, ok := s.relationAliases[name]; ok {
-		return canonical
+	if info, ok := s.relationAliases[name]; ok {
+		return info.Canonical
 	}
 	return name
 }
@@ -208,13 +214,8 @@ func (s *Schema) IsRelationInverse(name string) bool {
 	if _, ok := s.RelationTypes[name]; ok {
 		return false // it's the canonical, not inverse
 	}
-	if canonical, ok := s.relationAliases[name]; ok {
-		rt := s.RelationTypes[canonical]
-		if rt != nil && rt.InverseOf != "" && strings.ToUpper(rt.InverseOf) == name {
-			return true
-		}
-		// Check if the alias is listed as inverse
-		// Convention: aliases listed in InverseOf field are inverses
+	if info, ok := s.relationAliases[name]; ok {
+		return info.Flip
 	}
 	return false
 }
@@ -247,7 +248,7 @@ func (s *Schema) RegisterRelationAlias(alias, canonical string, isInverse bool) 
 	defer s.mu.Unlock()
 	alias = strings.ToUpper(alias)
 	canonical = strings.ToUpper(canonical)
-	s.relationAliases[alias] = canonical
+	s.relationAliases[alias] = RelationAliasInfo{Canonical: canonical, Flip: isInverse}
 	if rt, ok := s.RelationTypes[canonical]; ok {
 		found := false
 		for _, a := range rt.Aliases {
@@ -311,11 +312,22 @@ func (s *Schema) TypeAliasMap() map[string]string {
 	return m
 }
 
-// RelationAliasMap returns a copy of the current relation alias index.
+// RelationAliasMap returns a copy of the current relation alias index (canonical names only).
 func (s *Schema) RelationAliasMap() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	m := make(map[string]string, len(s.relationAliases))
+	for k, v := range s.relationAliases {
+		m[k] = v.Canonical
+	}
+	return m
+}
+
+// RelationAliasInfoMap returns a copy of the full relation alias index with flip info.
+func (s *Schema) RelationAliasInfoMap() map[string]RelationAliasInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m := make(map[string]RelationAliasInfo, len(s.relationAliases))
 	for k, v := range s.relationAliases {
 		m[k] = v
 	}

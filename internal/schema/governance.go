@@ -68,9 +68,13 @@ func (s *Schema) CheckProposedRelation(proposed string) GovernanceResult {
 
 	// Check alias index
 	s.mu.RLock()
-	if canonical, ok := s.relationAliases[proposed]; ok {
+	if info, ok := s.relationAliases[proposed]; ok {
 		s.mu.RUnlock()
-		return GovernanceResult{Decision: "synonym", CanonicalName: canonical, Confidence: 1.0}
+		decision := "synonym"
+		if info.Flip {
+			decision = "inverse"
+		}
+		return GovernanceResult{Decision: decision, CanonicalName: info.Canonical, Confidence: 1.0}
 	}
 	s.mu.RUnlock()
 
@@ -152,14 +156,9 @@ func (s *Schema) NormalizeTripleRelation(relName string) (canonical string, shou
 	}
 
 	// Check alias
-	if c, ok := s.relationAliases[relName]; ok {
-		// Determine if this is an inverse alias
-		rt := s.RelationTypes[c]
+	if info, ok := s.relationAliases[relName]; ok {
 		s.mu.RUnlock()
-		if rt != nil && strings.ToUpper(rt.InverseOf) == relName {
-			return c, true
-		}
-		return c, false
+		return info.Canonical, info.Flip
 	}
 	s.mu.RUnlock()
 

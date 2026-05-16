@@ -120,6 +120,16 @@ func ApplyVerification(triples []models.Triple, removals []string, modifications
 			continue
 		}
 		if mod, ok := modifications[key]; ok {
+			// Preserve metadata from original triple if modification doesn't supply it
+			if mod.Evidence == "" {
+				mod.Evidence = t.Evidence
+			}
+			if mod.ChunkID == "" {
+				mod.ChunkID = t.ChunkID
+			}
+			if mod.Weight == 0 {
+				mod.Weight = t.Weight
+			}
 			result = append(result, mod)
 			modified++
 			continue
@@ -275,11 +285,10 @@ func ResolveConflicts(triples []models.Triple) []models.Triple {
 		weakerEdge   string
 	}
 	rules := []subsumption{
-		{"BASED_AT", "WORKS_AT"},      // BASED_AT implies WORKS_AT
-		{"MANAGES", "WORKS_AT"},       // Manager at X implies works at X
-		{"MANAGES", "BASED_AT"},       // Manager at X implies based at X
-		{"OWNS", "PART_OF"},           // Ownership is stronger than part-of
-		{"HAS_CLINICIAN", "WORKS_AT"}, // Having a clinician implies they work there
+		{"BASED_AT", "WORKS_AT"}, // BASED_AT implies WORKS_AT
+		{"MANAGES", "WORKS_AT"},  // Manager at X implies works at X
+		{"MANAGES", "BASED_AT"},  // Manager at X implies based at X
+		{"OWNS", "PART_OF"},      // Ownership is stronger than part-of
 	}
 
 	// Build removal set
