@@ -120,17 +120,28 @@ func ApplyVerification(triples []models.Triple, removals []string, modifications
 			continue
 		}
 		if mod, ok := modifications[key]; ok {
-			// Preserve metadata from original triple if modification doesn't supply it
-			if mod.Evidence == "" {
-				mod.Evidence = t.Evidence
+			// Start from original, overlay only non-empty fields from modification
+			newT := t
+			if mod.Node1 != "" {
+				newT.Node1 = mod.Node1
 			}
-			if mod.ChunkID == "" {
-				mod.ChunkID = t.ChunkID
+			if mod.Node2 != "" {
+				newT.Node2 = mod.Node2
 			}
-			if mod.Weight == 0 {
-				mod.Weight = t.Weight
+			if mod.Edge != "" {
+				newT.Edge = mod.Edge
 			}
-			result = append(result, mod)
+			if mod.Node1Type != "" {
+				newT.Node1Type = mod.Node1Type
+			}
+			if mod.Node2Type != "" {
+				newT.Node2Type = mod.Node2Type
+			}
+			// Always keep original metadata
+			newT.Evidence = t.Evidence
+			newT.ChunkID = t.ChunkID
+			newT.Weight = t.Weight
+			result = append(result, newT)
 			modified++
 			continue
 		}

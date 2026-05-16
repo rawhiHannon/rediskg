@@ -87,8 +87,8 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 		log.Printf("Warning: standardization failed, continuing with raw names: %v", err)
 	}
 
-	// Phase 5: Build entity profiles (global entity registry)
-	log.Println("Building entity profiles...")
+	// Phase 5: Build initial entity profiles (for schema normalization context)
+	log.Println("Building initial entity profiles...")
 	profiles := p.buildEntityProfiles(allEntities, allTriples)
 	log.Printf("Built %d entity profiles", len(profiles))
 
@@ -115,6 +115,12 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 	entityTypeMap := buildEntityTypeMap(allEntities)
 	entityMap := entityTypeMapToFlat(entityTypeMap)
 
+	// Phase 7b: Rebuild profiles after canonicalization + entity rewrite
+	// Profiles now reflect canonical names and normalized types
+	log.Println("Rebuilding entity profiles post-canonicalization...")
+	profiles = p.buildEntityProfiles(allEntities, allTriples)
+	log.Printf("Rebuilt %d entity profiles", len(profiles))
+
 	// Phase 8: Schema rewrite — deterministically apply normalization to triples
 	// Resolves aliases, flips inverses, validates base-type constraints, rejects bad triples
 	log.Println("Rewriting triples with normalized schema...")
@@ -123,6 +129,10 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 	// Phase 9: Additional schema-based validation (dedup symmetric, etc.)
 	log.Println("Validating triples against schema...")
 	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap, p.schema)
+
+	// Snapshot: schema-valid triples before verification (for core fact preservation)
+	preVerificationTriples := make([]models.Triple, len(allTriples))
+	copy(preVerificationTriples, allTriples)
 
 	// Phase 10: Rich-context verification (LLM verifies with profiles + evidence)
 	log.Println("Verifying triples with evidence...")
@@ -141,17 +151,21 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 	// Phase 10d: Endpoint variant dedup (domain-agnostic pluralization merging)
 	allTriples = graph.DeduplicateEndpointVariants(allTriples)
 
-	// Phase 10e: Re-run schema validation after dedup (dedup can create new type mismatches)
-	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap, p.schema)
-
-	// Phase 10f: Conflict resolution — remove weaker facts when stronger exist
-	log.Println("Resolving conflicting/redundant triples...")
-	allTriples = graph.ResolveConflicts(allTriples)
-
-	// Phase 10g: Final canonical endpoint rewrite — guarantee all endpoints use canonical names
+	// Phase 10e: Final canonical endpoint rewrite — guarantee all endpoints use canonical names
 	if len(aliasMappings) > 0 {
 		allTriples = graph.ApplyStandardization(allTriples, aliasMappings)
 	}
+
+	// Phase 10f: Final authoritative compile — nothing passes without schema approval after this
+	log.Println("Final compile pass...")
+	entityMap = entityTypeMapToFlat(entityTypeMap)
+	allTriples = p.schema.RewriteTriples(allTriples, entityMap)
+	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap, p.schema)
+	allTriples = graph.ResolveConflicts(allTriples)
+
+	// Phase 10g: Core fact preservation — restore high-confidence structural facts
+	// that were schema-valid before verification but got removed
+	allTriples = graph.PreserveCoreFacts(preVerificationTriples, allTriples, entityMap, p.schema)
 
 	// Phase 11: Build final entity list from compiled graph endpoints only
 	mergedEntities := buildEntitiesFromGraph(allTriples, entityTypeMap)
