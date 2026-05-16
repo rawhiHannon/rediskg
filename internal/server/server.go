@@ -155,7 +155,7 @@ func (s *Server) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Paginated full graph
-	nodeCypher := fmt.Sprintf(`MATCH (n) RETURN n.name, labels(n), n.type ORDER BY n.name SKIP %d LIMIT %d`, offset, limit)
+	nodeCypher := fmt.Sprintf(`MATCH (n) WHERE NOT n:__Schema__ RETURN n.name, labels(n), n.type ORDER BY n.name SKIP %d LIMIT %d`, offset, limit)
 	nodeResult, err := s.store.ROQuery(nodeCypher)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -222,7 +222,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	export := ExportData{}
 
 	// Get all nodes
-	nodeResult, err := s.store.ROQuery(`MATCH (n) RETURN n.name, n.type ORDER BY n.name`)
+	nodeResult, err := s.store.ROQuery(`MATCH (n) WHERE NOT n:__Schema__ RETURN n.name, n.type ORDER BY n.name`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

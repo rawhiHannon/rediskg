@@ -9,160 +9,173 @@ import (
 	"rediskg/pkg/models"
 )
 
-// Phase 1: Entity extraction prompt — extracts named entities with universal types, descriptions, and properties.
-const EntityExtractionSystemPrompt = `You are a named entity extractor. Given text (delimited by triple backticks), extract all important named entities with their descriptions and properties.
+// DynamicEntityExtractionPrompt generates an entity extraction prompt using the current schema.
+// If the schema is empty (first run), it instructs the LLM to freely discover types.
+func DynamicEntityExtractionPrompt(typeSummary string) string {
+	typeSection := ""
+	if strings.Contains(typeSummary, "(no types defined yet") {
+		typeSection = `## Type system
+You are building the type system from scratch. Assign each entity a concise, lowercase type name that describes what it is.
+Good types: person, organization, location, service, product, event, technology, document, role, concept
+You may create ANY type that fits the data — there is no fixed list. Be consistent: similar entities should get the same type.`
+	} else {
+		typeSection = fmt.Sprintf(`## Type system (use existing types when possible, create new ones only when necessary)
+Known types in this graph:
+%s
+You may create new types if none of the above fit, but prefer reusing existing types for consistency.`, typeSummary)
+	}
+
+	return fmt.Sprintf(`You are a named entity extractor. Given text (delimited by triple backticks), extract all important named entities with their descriptions and properties.
 
 IMPORTANT: The text may be in any language (Arabic, English, Chinese, mixed, etc.). Extract entity names in their ORIGINAL language. Do not translate.
 
 ## Rules
 - Extract ONLY named or specific entities: proper nouns, named services, named places, specific roles tied to a person.
 - An entity must be something you can point to: a specific person, a specific organization, a specific place, a specific named service.
-- DO NOT extract generic words: "branch", "manager", "partner", "service", "appointment", "phone", "online", "samples", "stock", "booking", "active", "planned".
-- DO NOT extract abstract operational concepts: "company strategy", "executive hiring", "billing policy", "vendor payment approvals", "monthly reporting", "clinical quality", "escalation review", "integration roadmap", "knowledge base", "operations team".
-- DO NOT extract activity descriptions: "preventive health workshops", "routine blood testing", "chronic care management" UNLESS they are clearly named services offered by an organization.
+- DO NOT extract generic words or abstract operational concepts.
 - DO NOT extract pronouns, determiners, or status words.
 - DO NOT extract raw values: dates, times, phone numbers, IDs. These are properties, not entities.
-- DO NOT extract document titles unless they have a clear document ID (e.g. "SA-2024-019"). Generic titles like "internal operations knowledge base" are NOT entities.
 
-## Type system
-Classify each entity into exactly one of these universal types:
-- person: Named individual (e.g. "Dr. Sarah Cohen", "Lina Mansour")
-- organization: Company, network, lab, pharmacy, insurer, clinic branch, hospital (e.g. "CedarGate Health Network", "Haifa Central Clinic", "Carmel Pharmacy")
-- location: City, region, country (e.g. "Haifa", "Tel Aviv", "Israel")
-- address: Street address (e.g. "22 Herzl Street, Haifa")
-- service: Something offered, provided, booked, or performed (e.g. "dermatology", "physical therapy", "blood testing")
-- role: Job title or function (e.g. "branch manager", "chief medical officer")
-- event: Named incident, meeting, or occurrence (e.g. "Incident CG-2025-004")
-- document: Named document, policy, or agreement (e.g. "Service Agreement SA-2024-019")
-- technology: Software, system, portal (e.g. "MyCedar portal", "LabSync Pro")
-- concept: Abstract topic, rule, or category that doesn't fit above (e.g. "billing policy", "triage protocol")
-
-IMPORTANT: Clinic branches and labs are "organization", NOT "person". Named services like "dermatology" are "service", NOT "organization".
+%s
 
 ## Description
 For each entity, write a concise 1-sentence description summarizing what it is and its key attributes based on what the text says.
 
 ## Properties
-Extract factual attributes as SIMPLE key-value properties. Use ONLY these property keys:
-- status: "active", "planned", "closed", "under_evaluation", "suspended"
-- phone: phone number
-- email: email address
-- website: URL
-- founded: founding date
-- opened: opening date
-- role: person's job title
-- specialty: professional specialty
-- hours: operating hours
-
-IMPORTANT: Property keys must be single lowercase words (e.g. "status", "phone", "role"). Do NOT create compound keys like "agreement_status_with_X" or "contract_details". Only include properties explicitly stated in the text.
+Extract factual attributes as simple key-value properties. Use concise lowercase keys (e.g. "status", "phone", "email", "website", "founded", "role", "specialty", "hours").
+Only include properties explicitly stated in the text.
 
 ## Output format (JSON)
 {
   "entities": [
     {
       "name": "entity name in original language",
-      "type": "one of the types above",
+      "type": "type_name",
       "description": "concise 1-sentence description",
       "properties": {"key": "value"}
     }
   ]
-}`
+}`, typeSection)
+}
 
-// Phase 2: Relation extraction prompt — extracts relations between known entities.
-const RelationExtractionSystemPrompt = `You are a knowledge graph relation extractor. Given text and a list of known entities, extract factual relationships between them.
+// DynamicRelationExtractionPrompt generates a relation extraction prompt using the current schema.
+func DynamicRelationExtractionPrompt(relationSummary string) string {
+	relSection := ""
+	if strings.Contains(relationSummary, "(no relations defined yet") {
+		relSection = `## Relations
+You are building the relation schema from scratch. Create SHORT, GENERIC relation names in UPPER_SNAKE_CASE (max 2-3 words).
+
+CRITICAL RULES for naming relations:
+- Relations must be GENERIC and REUSABLE — the specifics go in the ENTITIES, not the relation name
+- WRONG: OFFERS_PEDIATRICS, HANDLES_PRESCRIPTION_FULFILLMENT_FOR, REQUIRES_PHONE_BOOKING
+- RIGHT: OFFERS (org → service), HANDLES (org → service), REQUIRES (entity → entity)
+- The relation name should work for MANY different entity pairs, not just one specific case
+- Maximum 2-3 words. If your relation name has 4+ words, you're encoding entity info in the relation.
+
+Good generic relations: WORKS_AT, LOCATED_IN, OFFERS, PROVIDES, FOUNDED_BY, PART_OF, MANAGES, PARTNERS_WITH, USES, SERVES, REPORTS_TO, HAS_ROLE, CONTRACTED_WITH, DOES_NOT_OFFER, INVOLVED_IN, SPECIALIZES_IN, ALIAS_OF`
+	} else {
+		relSection = fmt.Sprintf(`## Known relations (you MUST use these when they apply — do NOT create variants):
+%s
+CRITICAL: Do NOT create new relations that are just longer/more specific versions of existing ones.
+- If OFFERS exists, use it for ALL "offers/provides/has service" cases — do NOT create OFFERS_PEDIATRICS, OFFERS_BLOOD_TESTS, etc.
+- If LOCATED_IN exists, use it — do NOT create HEADQUARTERED_IN, BASED_IN, etc.
+- Only create a genuinely new relation if the semantic meaning is fundamentally different from ALL existing relations.`, relationSummary)
+	}
+
+	return fmt.Sprintf(`You are a knowledge graph relation extractor. Given text and a list of known entities, extract factual relationships between them.
 
 IMPORTANT: The text may be in any language. Use entity names exactly as provided in the entity list.
 
-## Allowed relations (use ONLY these):
-- WORKS_AT: person → organization (person is employed at org)
-- MANAGED_BY: organization → person (org's BRANCH-LEVEL manager ONLY — not executives/C-suite)
-- DEPUTY_MANAGER: organization → person (org's deputy/assistant manager)
-- VISITS: person → organization (person visits org regularly)
-- REPORTS_TO: person → person (person reports to another — ONLY if explicitly stated)
-- SPECIALIZES_IN: person → service (person specializes in service)
-- HAS_ROLE: person → role (person holds this job title, e.g. CEO, CFO, branch manager)
-- OFFERS_SERVICE: organization → service (org offers this service)
-- DOES_NOT_OFFER: organization → service (org explicitly does NOT offer this)
-- HAS_PARTNER: organization → organization (org partners with another — ACTIVE partnership only)
-- CONTRACTED_WITH: organization → organization (formal contract exists and is ACTIVE)
-- NO_CONTRACT: organization → organization (explicitly no contract)
-- LOCATED_AT: organization → address (org is at this address)
-- LOCATED_IN: organization → location (org is in this city/region)
-- PART_OF: organization → organization (child/branch is part of parent org, e.g. branch → network)
-- HAS_BRANCH: organization → organization (parent has this ACTIVE branch, e.g. network → branch)
-- HAS_PLANNED_BRANCH: organization → organization (parent has a PLANNED/FUTURE branch — not yet operational)
-- HAS_HEADQUARTERS: organization → organization (org's main headquarters facility)
-- FOUNDED_BY: organization → person (org was founded by person)
-- ALIAS_OF: entity → entity (alternate name → canonical name — ONLY true aliases, not HQ/facilities)
-- INVOLVED_IN: person → event (person involved in incident/event)
-- USES_TECHNOLOGY: organization → technology (org uses this system)
+%s
 
-## Direction rules (CRITICAL — follow these EXACTLY)
-- WORKS_AT: person is node_1, organization is node_2
-- MANAGED_BY: organization is node_1, person is node_2 (ONLY for branch managers, NOT executives)
-- DEPUTY_MANAGER: organization is node_1, person is node_2
-- VISITS: person is node_1, organization is node_2 (NEVER org → person)
-- OFFERS_SERVICE: organization is node_1, service is node_2 (NEVER service → org)
-- DOES_NOT_OFFER: organization is node_1, service is node_2
-- SPECIALIZES_IN: person is node_1, service is node_2 (NEVER service → person)
-- HAS_ROLE: person is node_1, role is node_2
-- LOCATED_AT: organization is node_1, address is node_2 (NEVER address → org)
-- PART_OF: child is node_1, parent is node_2 (branch → network)
-- HAS_BRANCH: parent is node_1, child is node_2 (network → branch)
-- HAS_PLANNED_BRANCH: parent is node_1, planned child is node_2
-- HAS_HEADQUARTERS: organization is node_1, hq facility is node_2
-- ALIAS_OF: alias/variant is node_1, canonical name is node_2
-
-## MANAGED_BY rules (CRITICAL)
-- MANAGED_BY is ONLY for branch-level managers (the person who runs a specific branch/clinic)
-- C-suite executives (CEO, CFO, COO, CMO, CTO) should use: person → HAS_ROLE → role + person → WORKS_AT → organization
-- Do NOT create MANAGED_BY edges for network-level executives
-- Do NOT infer REPORTS_TO unless the text explicitly says "X reports to Y"
+## Direction rules
+- Always put the "actor" or "subject" as node_1 and the "object" or "target" as node_2
+- For employment: person is node_1, organization is node_2
+- For services: organization is node_1, service is node_2
+- For containment: container/parent is node_1, contained/child is node_2
+- For ownership: owner is node_1, owned is node_2
+- Be consistent with direction for the same relation type
 
 ## Important
 - Extract ONLY facts explicitly stated in the text. Do not infer or guess.
-- If the text says someone does NOT work somewhere, do not create a WORKS_AT edge.
-- Extract negative facts: "Branch X does not offer Y" → DOES_NOT_OFFER
-- Distinguish ACTIVE from PLANNED: If a branch is "planned", "under construction", or "not yet open", use HAS_PLANNED_BRANCH not HAS_BRANCH.
-- HQ/headquarters is a facility, NOT an alias of the org. Use HAS_HEADQUARTERS.
+- Extract negative facts too (e.g. "X does not offer Y" → DOES_NOT_OFFER)
 - Use entity names EXACTLY as given in the entity list. Do not create new entities.
+- Keep relation names SHORT and GENERIC (2-3 words max). Put specifics in the entities.
 
 ## Output format (JSON)
 {
   "triples": [
     {
       "node_1": "entity name from the list",
+      "node_1_type": "type of node_1",
       "node_2": "entity name from the list",
-      "edge": "one of the allowed relations above"
+      "node_2_type": "type of node_2",
+      "edge": "RELATION_NAME"
     }
   ]
-}`
+}`, relSection)
+}
 
 // EntityStandardizationPrompt asks the LLM to deduplicate entity names.
-const EntityStandardizationPrompt = `You are an AI that standardizes entity names. Given a list of entity names extracted from a document, identify groups that refer to the same concept.
+const EntityStandardizationPrompt = `You are an AI that standardizes entity names. You are given entities grouped by type, with descriptions from the source text. Identify groups that refer to the same real-world entity and map variants to the canonical (preferred) name.
 
-This includes:
-- Same concept in different forms: "AI", "artificial intelligence", "A.I." -> "artificial intelligence"
-- Same concept across languages: "الذكاء الاصطناعي", "artificial intelligence" -> pick the most frequent form
-- Short names and full names: "Haifa Central" and "CedarGate Haifa Central Clinic" -> "cedargate haifa central clinic"
-- Abbreviations: "CGHN" and "CedarGate Health Network" -> "cedargate health network"
+## Merging rules:
+1. Person names with/without title prefix → map bare name to titled version
+2. Organization short name → full name (canonical = longest, most specific)
+3. Abbreviations → full name
+4. Service singular/plural and verbose variants → simplest canonical form
+5. Spelling/punctuation variants → normalized form
+6. Cross-language duplicates → most common form
 
-Return a JSON mapping from variant names to the canonical (preferred, longest, most specific) name:
+## IMPORTANT:
+- Do NOT merge entities that are genuinely different (e.g. different branches, different people).
+- Use the entity descriptions to verify — if two names have similar descriptions about the same real-world thing, they should merge.
+
+## Output format (JSON)
 {
   "mappings": {
-    "haifa central": "cedargate haifa central clinic",
-    "cghn": "cedargate health network",
-    "AI": "artificial intelligence"
+    "variant name": "canonical name",
+    "another variant": "canonical name"
   }
 }
 
 Only include entries that need mapping. If a name is already canonical, do not include it.`
 
+// GraphVerificationPrompt asks the LLM to review and correct a knowledge graph.
+const GraphVerificationPrompt = `You are a knowledge graph verifier. You are given:
+1. A list of EDGES (triples) from a knowledge graph.
+2. ENTITY DESCRIPTIONS extracted from the source documents — these contain the ground truth.
+
+Your job: cross-reference edges against entity descriptions and flag errors.
+
+## Checks:
+1. Contradictions with negative facts — if a description says "no contract", "not a partner", etc., remove contradicting edges
+2. Status conflicts — if something is "planned" or "not yet active", remove edges that imply it's active
+3. Semantic accuracy — verify the relation makes sense given entity descriptions
+4. Direction errors — source/target should match the relation's semantics
+
+## Output format (JSON)
+{
+  "remove": [
+    {"node_1": "...", "node_2": "...", "edge": "...", "reason": "brief explanation"}
+  ],
+  "modify": [
+    {"node_1": "...", "node_2": "...", "edge": "...", "new_edge": "...", "new_node_1": "...", "new_node_2": "...", "reason": "brief explanation"}
+  ]
+}
+
+Rules:
+- "remove" lists edges to delete entirely.
+- "modify" lists edges to change. Include new_edge if relation type changes, new_node_1/new_node_2 if direction flips.
+- Only include edges with ACTUAL problems.
+- If clean, return {"remove": [], "modify": []}.`
+
 // ExtractEntitiesFromChunk extracts entities with types from a text chunk (Phase 1).
-func ExtractEntitiesFromChunk(client *Client, text string) ([]models.Entity, error) {
+func ExtractEntitiesFromChunk(client *Client, text string, typeSummary string) ([]models.Entity, error) {
+	systemPrompt := DynamicEntityExtractionPrompt(typeSummary)
 	userPrompt := fmt.Sprintf("```%s```", text)
 
-	response, err := client.Complete(EntityExtractionSystemPrompt, userPrompt)
+	response, err := client.Complete(systemPrompt, userPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("entity extraction failed: %w", err)
 	}
@@ -200,7 +213,9 @@ func ExtractEntitiesFromChunk(client *Client, text string) ([]models.Entity, err
 }
 
 // ExtractRelationsFromChunk extracts relations between known entities (Phase 2).
-func ExtractRelationsFromChunk(client *Client, text string, entities []models.Entity, chunkID string) ([]models.Triple, error) {
+func ExtractRelationsFromChunk(client *Client, text string, entities []models.Entity, chunkID string, relationSummary string) ([]models.Triple, error) {
+	systemPrompt := DynamicRelationExtractionPrompt(relationSummary)
+
 	// Build entity list for the prompt
 	entityLines := make([]string, 0, len(entities))
 	for _, e := range entities {
@@ -210,7 +225,7 @@ func ExtractRelationsFromChunk(client *Client, text string, entities []models.En
 
 	userPrompt := fmt.Sprintf("Known entities:\n%s\n\nText: ```%s```", entityList, text)
 
-	response, err := client.Complete(RelationExtractionSystemPrompt, userPrompt)
+	response, err := client.Complete(systemPrompt, userPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("relation extraction failed: %w", err)
 	}
@@ -234,12 +249,16 @@ func ExtractRelationsFromChunk(client *Client, text string, entities []models.En
 		result.Triples[i].Node2 = normalizeNodeName(result.Triples[i].Node2)
 		result.Triples[i].Edge = strings.ToUpper(strings.TrimSpace(result.Triples[i].Edge))
 		result.Triples[i].ChunkID = chunkID
-		// Tag with entity types from Phase 1
-		if t, ok := typeMap[result.Triples[i].Node1]; ok {
-			result.Triples[i].Node1Type = t
+		// Tag with entity types from Phase 1 (fallback if not set by LLM)
+		if result.Triples[i].Node1Type == "" {
+			if t, ok := typeMap[result.Triples[i].Node1]; ok {
+				result.Triples[i].Node1Type = t
+			}
 		}
-		if t, ok := typeMap[result.Triples[i].Node2]; ok {
-			result.Triples[i].Node2Type = t
+		if result.Triples[i].Node2Type == "" {
+			if t, ok := typeMap[result.Triples[i].Node2]; ok {
+				result.Triples[i].Node2Type = t
+			}
 		}
 	}
 
@@ -247,13 +266,35 @@ func ExtractRelationsFromChunk(client *Client, text string, entities []models.En
 }
 
 // StandardizeEntities asks the LLM to find duplicate entity names and return a canonical mapping.
-func StandardizeEntities(client *Client, entityNames []string) (map[string]string, error) {
-	if len(entityNames) == 0 {
+func StandardizeEntities(client *Client, entities []models.Entity) (map[string]string, error) {
+	if len(entities) == 0 {
 		return nil, nil
 	}
 
-	namesJSON, _ := json.Marshal(entityNames)
-	userPrompt := fmt.Sprintf("Entity names:\n%s", string(namesJSON))
+	// Group entities by type for easier duplicate detection
+	byType := map[string][]models.Entity{}
+	for _, e := range entities {
+		typ := e.Type
+		if typ == "" {
+			typ = "unknown"
+		}
+		byType[typ] = append(byType[typ], e)
+	}
+
+	var sb strings.Builder
+	for typ, ents := range byType {
+		sb.WriteString(fmt.Sprintf("\n## %s entities:\n", typ))
+		for _, e := range ents {
+			desc, _ := e.Properties["description"].(string)
+			if desc != "" {
+				sb.WriteString(fmt.Sprintf("- %s: %s\n", e.Name, desc))
+			} else {
+				sb.WriteString(fmt.Sprintf("- %s\n", e.Name))
+			}
+		}
+	}
+
+	userPrompt := sb.String()
 
 	response, err := client.Complete(EntityStandardizationPrompt, userPrompt)
 	if err != nil {
@@ -271,62 +312,65 @@ func StandardizeEntities(client *Client, entityNames []string) (map[string]strin
 	return result.Mappings, nil
 }
 
-// ClassifyEntityTypesPrompt asks the LLM to classify ambiguous entity names.
-const ClassifyEntityTypesPrompt = `You are an entity type classifier. Given a list of entity names, classify each into exactly one type.
-
-## Type system
-- person: Named individual (e.g. "noa shapira", "dr. sarah cohen", "lina mansour")
-- organization: Company, network, lab, pharmacy, clinic, hospital, insurer (e.g. "cedargate health network", "haifa central clinic")
-- location: City, region, country (e.g. "haifa", "tel aviv", "israel")
-- address: Street address (e.g. "22 herzl street, haifa")
-- service: Something offered, provided, booked, or performed (e.g. "dermatology", "physical therapy", "blood testing")
-- role: Job title or function (e.g. "branch manager", "chief medical officer")
-- event: Named incident, meeting, or occurrence (e.g. "incident cg-2025-004")
-- document: Named document, policy, or agreement (e.g. "service agreement sa-2024-019")
-- technology: Software, system, portal, platform (e.g. "mycedar portal", "labsync pro")
-- concept: Abstract topic or category that doesn't fit above (e.g. "billing policy", "triage protocol")
-
-## Rules
-- A 2-3 word name with no technical/organizational keywords is usually a person name.
-- Names containing "clinic", "hospital", "lab", "pharmacy", "network" etc. are organizations.
-- Names containing "portal", "system", "software", "platform" etc. are technology.
-- If uncertain, prefer "person" for short human-sounding names and "concept" for abstract terms.
-
-## Output format (JSON)
-{
-  "classifications": {
-    "entity name": "type",
-    "another entity": "type"
-  }
-}`
-
-// ClassifyEntityTypes asks the LLM to classify a batch of ambiguous entity names into types.
-func ClassifyEntityTypes(client *Client, entities map[string]string) (map[string]string, error) {
-	if len(entities) == 0 {
-		return nil, nil
+// VerifyGraph asks the LLM to review the full edge list with entity context and return corrections.
+func VerifyGraph(client *Client, triples []models.Triple, entities []models.Entity) ([]VerifyRemoval, []VerifyModification, error) {
+	if len(triples) == 0 {
+		return nil, nil, nil
 	}
 
-	// Send only entity names — do NOT include current types to avoid biasing the LLM
-	lines := make([]string, 0, len(entities))
-	for name := range entities {
-		lines = append(lines, fmt.Sprintf("- %s", name))
+	// Build entity description section
+	descLines := make([]string, 0, len(entities))
+	for _, e := range entities {
+		desc, _ := e.Properties["description"].(string)
+		if desc != "" {
+			descLines = append(descLines, fmt.Sprintf("- %s (%s): %s", e.Name, e.Type, desc))
+		}
 	}
-	userPrompt := fmt.Sprintf("Classify these entities:\n%s", strings.Join(lines, "\n"))
 
-	response, err := client.Complete(ClassifyEntityTypesPrompt, userPrompt)
+	// Build edge list
+	edgeLines := make([]string, 0, len(triples))
+	for _, t := range triples {
+		edgeLines = append(edgeLines, fmt.Sprintf("- %s (%s) -[%s]-> %s (%s)",
+			t.Node1, t.Node1Type, t.Edge, t.Node2, t.Node2Type))
+	}
+
+	userPrompt := fmt.Sprintf("## Entity descriptions (ground truth from source documents):\n%s\n\n## Edges to verify (%d total):\n%s",
+		strings.Join(descLines, "\n"), len(triples), strings.Join(edgeLines, "\n"))
+
+	response, err := client.Complete(GraphVerificationPrompt, userPrompt)
 	if err != nil {
-		return nil, fmt.Errorf("entity classification failed: %w", err)
+		return nil, nil, fmt.Errorf("graph verification failed: %w", err)
 	}
 
 	var result struct {
-		Classifications map[string]string `json:"classifications"`
+		Remove []VerifyRemoval      `json:"remove"`
+		Modify []VerifyModification `json:"modify"`
 	}
 	if err := json.Unmarshal([]byte(response), &result); err != nil {
-		log.Printf("Warning: failed to parse classification response: %v", err)
-		return nil, nil
+		log.Printf("Warning: failed to parse verification response: %v", err)
+		return nil, nil, nil
 	}
 
-	return result.Classifications, nil
+	return result.Remove, result.Modify, nil
+}
+
+// VerifyRemoval represents an edge the LLM wants to remove.
+type VerifyRemoval struct {
+	Node1  string `json:"node_1"`
+	Node2  string `json:"node_2"`
+	Edge   string `json:"edge"`
+	Reason string `json:"reason"`
+}
+
+// VerifyModification represents an edge the LLM wants to modify.
+type VerifyModification struct {
+	Node1    string `json:"node_1"`
+	Node2    string `json:"node_2"`
+	Edge     string `json:"edge"`
+	NewEdge  string `json:"new_edge,omitempty"`
+	NewNode1 string `json:"new_node_1,omitempty"`
+	NewNode2 string `json:"new_node_2,omitempty"`
+	Reason   string `json:"reason"`
 }
 
 // normalizeNodeName trims whitespace and lowercases Latin characters.

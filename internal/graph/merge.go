@@ -156,43 +156,10 @@ func ApplyStandardizationToEntities(entities []models.Entity, mappings map[strin
 	return result
 }
 
-// deduplicateSymmetricEdges removes inverse duplicates for symmetric relations
-// like HAS_PARTNER. If both A->HAS_PARTNER->B and B->HAS_PARTNER->A exist,
-// keep only the one where Node1 sorts first alphabetically.
+// deduplicateSymmetricEdges is kept for backward compatibility.
+// Symmetric dedup is now handled in validate.go using the schema.
 func deduplicateSymmetricEdges(edges []models.EdgeRecord) []models.EdgeRecord {
-	symmetricRelations := map[string]bool{
-		"HAS_PARTNER":     true,
-		"CONTRACTED_WITH": true,
-		"NO_CONTRACT":     true,
-	}
-
-	// Build set of (sorted pair, relation) already seen
-	seen := map[string]bool{}
-	removed := 0
-	result := make([]models.EdgeRecord, 0, len(edges))
-
-	for _, e := range edges {
-		if symmetricRelations[e.Edge] {
-			// Create a canonical key with sorted node pair
-			a, b := e.Node1, e.Node2
-			if a > b {
-				a, b = b, a
-			}
-			key := a + "|||" + e.Edge + "|||" + b
-			if seen[key] {
-				removed++
-				continue
-			}
-			seen[key] = true
-		}
-		result = append(result, e)
-	}
-
-	if removed > 0 {
-		log.Printf("Dedup: removed %d inverse-duplicate symmetric edges", removed)
-	}
-
-	return result
+	return edges
 }
 
 func appendUnique(slice []string, item string) []string {

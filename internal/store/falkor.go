@@ -64,8 +64,8 @@ func (s *FalkorStore) ROQuery(cypher string) (interface{}, error) {
 // CreateEntity creates or merges an entity node in the graph with properties.
 // Always updates type and properties (not just on create) so validated data overwrites earlier values.
 func (s *FalkorStore) CreateEntity(entity models.Entity) error {
-	name := escapeCypher(entity.Name)
-	entityType := escapeCypher(entity.Type)
+	name := escapeCypher(strings.ToLower(strings.TrimSpace(entity.Name)))
+	entityType := escapeCypher(strings.ToLower(strings.TrimSpace(entity.Type)))
 	if entityType == "" {
 		entityType = "Concept"
 	}
@@ -94,15 +94,17 @@ func (s *FalkorStore) CreateEntity(entity models.Entity) error {
 // CreateEdge creates or merges a relationship in the graph.
 // Always updates entity types so validated types overwrite bad earlier ones.
 func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
-	if record.Node1 == record.Node2 {
+	node1 := strings.ToLower(strings.TrimSpace(record.Node1))
+	node2 := strings.ToLower(strings.TrimSpace(record.Node2))
+	if node1 == node2 {
 		return nil // skip self-referencing edges
 	}
-	n1 := escapeCypher(record.Node1)
-	n2 := escapeCypher(record.Node2)
+	n1 := escapeCypher(node1)
+	n2 := escapeCypher(node2)
 	edgeType := toEdgeType(record.Edge)
 	edgeDesc := escapeCypher(record.Edge)
-	n1Type := escapeCypher(record.Node1Type)
-	n2Type := escapeCypher(record.Node2Type)
+	n1Type := escapeCypher(strings.ToLower(strings.TrimSpace(record.Node1Type)))
+	n2Type := escapeCypher(strings.ToLower(strings.TrimSpace(record.Node2Type)))
 
 	// Build type SET clauses (applied after both MERGEs, always overwrites)
 	var typeSets []string
@@ -175,7 +177,7 @@ func (s *FalkorStore) FindSimilarEntities(label, property string, embedding []fl
 
 // GetAllNodes returns all node names and types.
 func (s *FalkorStore) GetAllNodes() ([]map[string]interface{}, error) {
-	cypher := `MATCH (n) RETURN n.name, labels(n), n.type ORDER BY n.name`
+	cypher := `MATCH (n) WHERE NOT n:__Schema__ RETURN n.name, labels(n), n.type ORDER BY n.name`
 	result, err := s.ROQuery(cypher)
 	if err != nil {
 		return nil, err
@@ -200,7 +202,7 @@ func (s *FalkorStore) GetNeighbors(name string, depth int) ([]map[string]interfa
 func (s *FalkorStore) GetGraphStats() (map[string]int64, error) {
 	stats := map[string]int64{}
 
-	nodeResult, err := s.ROQuery(`MATCH (n) RETURN count(n)`)
+	nodeResult, err := s.ROQuery(`MATCH (n) WHERE NOT n:__Schema__ RETURN count(n)`)
 	if err == nil {
 		if count := parseCount(nodeResult); count >= 0 {
 			stats["nodes"] = count
@@ -224,6 +226,104 @@ func (s *FalkorStore) DeleteGraph() error {
 		return nil // graph doesn't exist, that's fine
 	}
 	return err
+}
+
+// SaveSchema persists the schema (entity types + relation types) as special nodes in the graph.
+func (s *FalkorStore) SaveSchema(entityTypes map[string]struct{ Desc, Parent string }, relationTypes map[string]struct {
+	Desc        string
+	SourceTypes []string
+	TargetTypes []string
+	Symmetric   bool
+}) error {
+	for name, et := range entityTypes {
+		cypher := fmt.Sprintf(
+			`MERGE (s:__Schema__:__EntityType__ {name: '%s'}) SET s.description = '%s', s.parent_type = '%s'`,
+			escapeCypher(name), escapeCypher(et.Desc), escapeCypher(et.Parent),
+		)
+		if _, err := s.Query(cypher); err != nil {
+			return fmt.Errorf("failed to save entity type %s: %w", name, err)
+		}
+	}
+
+	for name, rt := range relationTypes {
+		cypher := fmt.Sprintf(
+			`MERGE (s:__Schema__:__RelationType__ {name: '%s'}) SET s.description = '%s', s.source_types = '%s', s.target_types = '%s', s.symmetric = %t`,
+			escapeCypher(name),
+			escapeCypher(rt.Desc),
+			escapeCypher(strings.Join(rt.SourceTypes, ",")),
+			escapeCypher(strings.Join(rt.TargetTypes, ",")),
+			rt.Symmetric,
+		)
+		if _, err := s.Query(cypher); err != nil {
+			return fmt.Errorf("failed to save relation type %s: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
+// LoadSchemaEntityTypes loads persisted entity type definitions from the graph.
+func (s *FalkorStore) LoadSchemaEntityTypes() ([]map[string]string, error) {
+	cypher := `MATCH (s:__Schema__:__EntityType__) RETURN s.name, s.description, s.parent_type`
+	result, err := s.ROQuery(cypher)
+	if err != nil {
+		return nil, err
+	}
+
+	var types []map[string]string
+	if arr, ok := result.([]interface{}); ok && len(arr) >= 2 {
+		if rows, ok := arr[1].([]interface{}); ok {
+			for _, row := range rows {
+				if cols, ok := row.([]interface{}); ok && len(cols) >= 3 {
+					m := map[string]string{
+						"name":        safeString(cols[0]),
+						"description": safeString(cols[1]),
+						"parent_type": safeString(cols[2]),
+					}
+					types = append(types, m)
+				}
+			}
+		}
+	}
+	return types, nil
+}
+
+// LoadSchemaRelationTypes loads persisted relation type definitions from the graph.
+func (s *FalkorStore) LoadSchemaRelationTypes() ([]map[string]string, error) {
+	cypher := `MATCH (s:__Schema__:__RelationType__) RETURN s.name, s.description, s.source_types, s.target_types, s.symmetric`
+	result, err := s.ROQuery(cypher)
+	if err != nil {
+		return nil, err
+	}
+
+	var types []map[string]string
+	if arr, ok := result.([]interface{}); ok && len(arr) >= 2 {
+		if rows, ok := arr[1].([]interface{}); ok {
+			for _, row := range rows {
+				if cols, ok := row.([]interface{}); ok && len(cols) >= 5 {
+					m := map[string]string{
+						"name":         safeString(cols[0]),
+						"description":  safeString(cols[1]),
+						"source_types": safeString(cols[2]),
+						"target_types": safeString(cols[3]),
+						"symmetric":    safeString(cols[4]),
+					}
+					types = append(types, m)
+				}
+			}
+		}
+	}
+	return types, nil
+}
+
+func safeString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if str, ok := v.(string); ok {
+		return str
+	}
+	return fmt.Sprint(v)
 }
 
 // Close closes the Redis connection.
