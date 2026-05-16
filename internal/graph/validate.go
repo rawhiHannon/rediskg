@@ -255,3 +255,82 @@ func deduplicateSymmetricFromSchema(triples []models.Triple, s *schema.Schema) [
 func tripleKey(t models.Triple) string {
 	return strings.ToLower(t.Node1) + "|" + strings.ToUpper(t.Edge) + "|" + strings.ToLower(t.Node2)
 }
+
+// ResolveConflicts removes weaker/redundant triples when stronger alternatives exist.
+// Rules:
+// - If entity has BASED_AT X, remove WORKS_AT X (BASED_AT is more specific)
+// - If entity MANAGES X, remove WORKS_AT X for same entity (implied)
+// - Deduplicate exact same fact with different evidence (keep first)
+// - Remove generic relations when specific ones exist for same pair
+func ResolveConflicts(triples []models.Triple) []models.Triple {
+	// Index: entity → set of (relation, target) pairs
+	type relTarget struct {
+		edge   string
+		target string
+	}
+	entityRels := map[string]map[relTarget]bool{}
+
+	for _, t := range triples {
+		src := strings.ToLower(t.Node1)
+		if entityRels[src] == nil {
+			entityRels[src] = map[relTarget]bool{}
+		}
+		entityRels[src][relTarget{strings.ToUpper(t.Edge), strings.ToLower(t.Node2)}] = true
+	}
+
+	// Define subsumption rules: if (stronger) exists, (weaker) is redundant
+	type subsumption struct {
+		strongerEdge string
+		weakerEdge   string
+	}
+	rules := []subsumption{
+		{"BASED_AT", "WORKS_AT"},      // BASED_AT implies WORKS_AT
+		{"MANAGES", "WORKS_AT"},       // Manager at X implies works at X
+		{"MANAGES", "BASED_AT"},       // Manager at X implies based at X
+		{"OWNS", "PART_OF"},           // Ownership is stronger than part-of
+		{"HAS_CLINICIAN", "WORKS_AT"}, // Having a clinician implies they work there
+	}
+
+	// Build removal set
+	removeKeys := map[string]bool{}
+	for _, t := range triples {
+		src := strings.ToLower(t.Node1)
+		edge := strings.ToUpper(t.Edge)
+		tgt := strings.ToLower(t.Node2)
+
+		for _, rule := range rules {
+			if edge == rule.weakerEdge {
+				// Check if stronger exists for same src→tgt
+				if entityRels[src][relTarget{rule.strongerEdge, tgt}] {
+					key := src + "|" + edge + "|" + tgt
+					removeKeys[key] = true
+				}
+			}
+		}
+	}
+
+	// Also deduplicate exact same (src, edge, tgt) — keep first occurrence
+	seen := map[string]bool{}
+	result := make([]models.Triple, 0, len(triples))
+	removed := 0
+
+	for _, t := range triples {
+		key := strings.ToLower(t.Node1) + "|" + strings.ToUpper(t.Edge) + "|" + strings.ToLower(t.Node2)
+
+		if removeKeys[key] {
+			removed++
+			continue
+		}
+		if seen[key] {
+			removed++
+			continue
+		}
+		seen[key] = true
+		result = append(result, t)
+	}
+
+	if removed > 0 {
+		log.Printf("Conflict resolution: removed %d weaker/duplicate triples", removed)
+	}
+	return result
+}

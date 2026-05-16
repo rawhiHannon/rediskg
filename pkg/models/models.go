@@ -23,6 +23,7 @@ type Triple struct {
 	Node2     string `json:"node_2"`
 	Node2Type string `json:"node_2_type,omitempty"`
 	Edge      string `json:"edge"`
+	Evidence  string `json:"evidence,omitempty"`  // source text that supports this triple
 	ChunkID   string `json:"chunk_id,omitempty"`
 	Weight    float64
 }
@@ -31,9 +32,31 @@ type Triple struct {
 type Entity struct {
 	ID         string                 `json:"id"`
 	Name       string                 `json:"name"`
-	Type       string                 `json:"type"`
+	Type       string                 `json:"type"`                  // resolved type (base_type or domain_type)
+	BaseType   string                 `json:"base_type,omitempty"`   // universal scaffold type
+	DomainType string                 `json:"domain_type,omitempty"` // domain-specific subtype
 	Properties map[string]interface{} `json:"properties,omitempty"`
 	Embedding  []float32              `json:"embedding,omitempty"`
+}
+
+// EntityProfile holds the global merged view of an entity across all chunks.
+type EntityProfile struct {
+	Name           string   // canonical name
+	CandidateTypes []string // all types proposed across chunks
+	Mentions       []string // evidence sentences mentioning this entity
+	Description    string   // merged description
+	BaseType       string   // resolved base type
+	DomainType     string   // resolved domain type
+	Confidence     float64  // type confidence
+}
+
+// CandidateRelation holds a proposed relation before normalization.
+type CandidateRelation struct {
+	Name       string   // relation name as extracted
+	Aliases    []string // other names that mean the same thing
+	SourceBase []string // allowed source base types
+	TargetBase []string // allowed target base types
+	Direction  string   // "forward", "inverse", or "symmetric"
 }
 
 // GraphData holds the complete extraction result from a chunk.
