@@ -122,9 +122,9 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 	log.Printf("Rebuilt %d entity profiles", len(profiles))
 
 	// Phase 8: Schema rewrite — deterministically apply normalization to triples
-	// Resolves aliases, flips inverses, validates base-type constraints, rejects bad triples
+	// Resolves aliases, flips inverses, validates base-type + domain-type constraints
 	log.Println("Rewriting triples with normalized schema...")
-	allTriples = p.schema.RewriteTriples(allTriples, entityMap)
+	allTriples = p.schema.RewriteTriplesRich(allTriples, entityTypeMap)
 
 	// Phase 9: Additional schema-based validation (dedup symmetric, etc.)
 	log.Println("Validating triples against schema...")
@@ -141,7 +141,7 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 	// Phase 10b: Re-run schema compiler after LLM verification
 	// Verification can modify triples — revalidate against schema
 	log.Println("Re-validating triples after verification...")
-	allTriples = p.schema.RewriteTriples(allTriples, entityMap)
+	allTriples = p.schema.RewriteTriplesRich(allTriples, entityTypeMap)
 	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap, p.schema)
 
 	// Phase 10c: Contextual enforcement — status-aware and role-aware checks
@@ -159,8 +159,9 @@ func (p *Pipeline) ingestDocuments(docs []*models.Document) error {
 	// Phase 10f: Final authoritative compile — nothing passes without schema approval after this
 	log.Println("Final compile pass...")
 	entityMap = entityTypeMapToFlat(entityTypeMap)
-	allTriples = p.schema.RewriteTriples(allTriples, entityMap)
+	allTriples = p.schema.RewriteTriplesRich(allTriples, entityTypeMap)
 	allTriples = graph.ValidateAndNormalizeTriples(allTriples, entityMap, p.schema)
+	allTriples = applyContextualEnforcement(allTriples, profiles, entityTypeMap)
 	allTriples = graph.ResolveConflicts(allTriples)
 
 	// Phase 10g: Core fact preservation — restore high-confidence structural facts
@@ -379,11 +380,8 @@ func (p *Pipeline) fallbackHeuristicGovernance(entities []models.Entity, triples
 }
 
 // EntityTypeInfo holds the resolved type information for an entity after schema normalization.
-type EntityTypeInfo struct {
-	Type       string // resolved type (may be base or domain type)
-	BaseType   string // universal scaffold type (person, organization, etc.)
-	DomainType string // domain-specific subtype (clinic_branch, etc.)
-}
+// EntityTypeInfo is an alias for models.EntityTypeInfo used throughout the pipeline.
+type EntityTypeInfo = models.EntityTypeInfo
 
 // buildEntityTypeMap creates a name→EntityTypeInfo lookup from rewritten entities (majority vote).
 // This is the AUTHORITATIVE type source — once built, it should not be mutated by triples.
@@ -715,14 +713,42 @@ func applyContextualEnforcement(triples []models.Triple, profiles map[string]*mo
 		}
 	}
 
-	// Detect deputy entities: entities that have "deputy" in their HAS_ROLE targets
-	// We detect these from the triples themselves
+	// Detect deputy entities from multiple sources:
+	// 1. HAS_ROLE triples with deputy/acting/interim in target
+	// 2. Profile evidence mentioning deputy/acting/interim role
+	// 3. Entity name containing deputy role keywords
 	deputyPersons := map[string]bool{}
+	deputyKeywords := []string{"deputy", "acting", "interim", "assistant manager", "vice manager"}
+
+	// Source 1: HAS_ROLE triples
 	for _, t := range triples {
 		if strings.ToUpper(t.Edge) == "HAS_ROLE" {
 			targetLower := strings.ToLower(t.Node2)
-			if strings.Contains(targetLower, "deputy") || strings.Contains(targetLower, "acting") || strings.Contains(targetLower, "interim") {
-				deputyPersons[t.Node1] = true
+			for _, kw := range deputyKeywords {
+				if strings.Contains(targetLower, kw) {
+					deputyPersons[t.Node1] = true
+					break
+				}
+			}
+		}
+	}
+
+	// Source 2: Profile evidence (catches cases where HAS_ROLE triple was removed)
+	for name, prof := range profiles {
+		if prof == nil {
+			continue
+		}
+		info := entityTypeMap[name]
+		if info == nil || info.BaseType != "person" {
+			continue
+		}
+		for _, mention := range prof.Mentions {
+			mentionLower := strings.ToLower(mention)
+			for _, kw := range deputyKeywords {
+				if strings.Contains(mentionLower, kw) && strings.Contains(mentionLower, strings.ToLower(name)) {
+					deputyPersons[name] = true
+					break
+				}
 			}
 		}
 	}
@@ -778,60 +804,145 @@ func applyContextualEnforcement(triples []models.Triple, profiles map[string]*mo
 // limitBasedAt ensures each person has at most one BASED_AT relation.
 // Keeps the best-evidenced BASED_AT (by weight, then evidence length) and converts others to VISITS.
 func limitBasedAt(triples []models.Triple, entityTypeMap map[string]*EntityTypeInfo) []models.Triple {
-	// Collect BASED_AT indices per person
-	type basedAtEntry struct {
+	// Evidence keywords that support BASED_AT vs VISITS
+	basedKeywords := []string{"based at", "base branch", "main branch", "primary branch", "home branch", "stationed at"}
+	visitsKeywords := []string{"visits", "visiting", "rotates", "covers", "provides services at", "remote"}
+
+	type locationEntry struct {
 		index    int
 		weight   float64
-		evidence int // length of evidence string as quality proxy
+		evidence string
+		target   string
 	}
-	personBasedAt := map[string][]basedAtEntry{}
+
+	// Collect all person-location edges (BASED_AT and VISITS) per person
+	personBasedAt := map[string][]locationEntry{}
+	personVisits := map[string]map[string]bool{} // person → set of VISITS targets
+
 	for i, t := range triples {
-		if strings.ToUpper(t.Edge) == "BASED_AT" {
-			info := entityTypeMap[t.Node1]
-			if info != nil && info.BaseType == "person" {
-				personBasedAt[t.Node1] = append(personBasedAt[t.Node1], basedAtEntry{
-					index:    i,
-					weight:   t.Weight,
-					evidence: len(t.Evidence),
-				})
+		edge := strings.ToUpper(t.Edge)
+		info := entityTypeMap[t.Node1]
+		if info == nil || info.BaseType != "person" {
+			continue
+		}
+		if edge == "BASED_AT" {
+			personBasedAt[t.Node1] = append(personBasedAt[t.Node1], locationEntry{
+				index:    i,
+				weight:   t.Weight,
+				evidence: t.Evidence,
+				target:   strings.ToLower(t.Node2),
+			})
+		} else if edge == "VISITS" {
+			if personVisits[t.Node1] == nil {
+				personVisits[t.Node1] = map[string]bool{}
 			}
+			personVisits[t.Node1][strings.ToLower(t.Node2)] = true
 		}
 	}
 
-	// For persons with multiple BASED_AT, find the best one and convert the rest
-	convertIndices := map[int]bool{}
-	for _, entries := range personBasedAt {
+	convertIndices := map[int]bool{}  // BASED_AT → VISITS
+	removeIndices := map[int]bool{}   // duplicate removal
+
+	for person, entries := range personBasedAt {
 		if len(entries) <= 1 {
+			// Single BASED_AT — check if evidence actually says "visits"
+			if len(entries) == 1 {
+				evLower := strings.ToLower(entries[0].evidence)
+				isVisit := false
+				for _, kw := range visitsKeywords {
+					if strings.Contains(evLower, kw) {
+						isVisit = true
+						break
+					}
+				}
+				if isVisit {
+					// Evidence says visits, not based — convert
+					hasBased := false
+					for _, kw := range basedKeywords {
+						if strings.Contains(evLower, kw) {
+							hasBased = true
+							break
+						}
+					}
+					if !hasBased {
+						convertIndices[entries[0].index] = true
+					}
+				}
+			}
 			continue
 		}
-		// Pick best: highest weight, tie-break by evidence length
+
+		// Multiple BASED_AT: score each by evidence quality
+		type scored struct {
+			idx   int
+			score int
+		}
+		var scoredEntries []scored
+		for _, e := range entries {
+			score := 0
+			evLower := strings.ToLower(e.evidence)
+			// Boost for explicit "based" keywords
+			for _, kw := range basedKeywords {
+				if strings.Contains(evLower, kw) {
+					score += 20
+					break
+				}
+			}
+			// Penalize if evidence says "visits"
+			for _, kw := range visitsKeywords {
+				if strings.Contains(evLower, kw) {
+					score -= 15
+					break
+				}
+			}
+			// Weight contributes
+			score += int(e.weight * 10)
+			// Evidence length as tie-breaker
+			score += len(e.evidence) / 50
+
+			scoredEntries = append(scoredEntries, scored{e.index, score})
+		}
+
+		// Find best
 		bestIdx := 0
-		for i := 1; i < len(entries); i++ {
-			if entries[i].weight > entries[bestIdx].weight ||
-				(entries[i].weight == entries[bestIdx].weight && entries[i].evidence > entries[bestIdx].evidence) {
+		for i := 1; i < len(scoredEntries); i++ {
+			if scoredEntries[i].score > scoredEntries[bestIdx].score {
 				bestIdx = i
 			}
 		}
-		for i, e := range entries {
-			if i != bestIdx {
-				convertIndices[e.index] = true
+
+		// Convert non-best to VISITS, or remove if person already has VISITS to same target
+		visits := personVisits[person]
+		for i, se := range scoredEntries {
+			if i == bestIdx {
+				continue
+			}
+			target := entries[i].target
+			if visits != nil && visits[target] {
+				// Already has VISITS to this target — remove duplicate
+				removeIndices[se.idx] = true
+			} else {
+				convertIndices[se.idx] = true
 			}
 		}
 	}
 
-	if len(convertIndices) == 0 {
+	if len(convertIndices) == 0 && len(removeIndices) == 0 {
 		return triples
 	}
 
-	result := make([]models.Triple, len(triples))
+	result := make([]models.Triple, 0, len(triples))
 	for i, t := range triples {
-		result[i] = t
-		if convertIndices[i] {
-			result[i].Edge = "VISITS"
+		if removeIndices[i] {
+			continue
 		}
+		if convertIndices[i] {
+			t.Edge = "VISITS"
+		}
+		result = append(result, t)
 	}
 
-	log.Printf("BASED_AT limiter: converted %d extra BASED_AT to VISITS (evidence-ranked)", len(convertIndices))
+	log.Printf("BASED_AT cleanup: converted %d to VISITS, removed %d duplicates (evidence-ranked)", len(convertIndices), len(removeIndices))
 	return result
 }
 

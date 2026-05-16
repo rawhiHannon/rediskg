@@ -84,6 +84,14 @@ type Community struct {
 	Color string
 }
 
+// EntityTypeInfo holds the rich type information for an entity (base + domain type).
+// Used by the compiler to make relation-direction decisions beyond flat base types.
+type EntityTypeInfo struct {
+	Type       string // resolved type (may be base or domain type)
+	BaseType   string // universal scaffold type (person, organization, location, etc.)
+	DomainType string // domain-specific subtype (clinic_branch, healthcare_network, etc.)
+}
+
 // QueryResult holds the response to a natural language query.
 type QueryResult struct {
 	Answer   string                   `json:"answer"`

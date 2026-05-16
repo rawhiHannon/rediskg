@@ -300,15 +300,28 @@ func (s *Schema) RewriteEntities(entities []models.Entity) []models.Entity {
 	return result
 }
 
-// RewriteTriples applies the normalized schema to triples:
+// RewriteTriples applies the normalized schema to triples using a flat entity type map.
+// Delegates to RewriteTriplesRich after converting to rich info.
+func (s *Schema) RewriteTriples(triples []models.Triple, entityMap map[string]string) []models.Triple {
+	rich := make(map[string]*models.EntityTypeInfo, len(entityMap))
+	for name, typ := range entityMap {
+		rich[name] = &models.EntityTypeInfo{
+			Type:     typ,
+			BaseType: s.ResolveBaseType(typ),
+		}
+	}
+	return s.RewriteTriplesRich(triples, rich)
+}
+
+// RewriteTriplesRich applies the normalized schema to triples using rich entity type info:
 // - Removes ALIAS_OF triples (aliases belong in entity standardization, not the graph)
 // - Resolves relation aliases
 // - Flips inverse relations
 // - Fixes HAS_ROLE target typing (role entities that got rewritten to "person")
 // - Resolves entity type aliases
 // - Rejects triples with rejected relations
-// - Validates base-type constraints
-func (s *Schema) RewriteTriples(triples []models.Triple, entityMap map[string]string) []models.Triple {
+// - Validates base-type and domain-type constraints
+func (s *Schema) RewriteTriplesRich(triples []models.Triple, entityMap map[string]*models.EntityTypeInfo) []models.Triple {
 	result := make([]models.Triple, 0, len(triples))
 	normalized := 0
 	flipped := 0
@@ -324,19 +337,21 @@ func (s *Schema) RewriteTriples(triples []models.Triple, entityMap map[string]st
 		}
 
 		// Reject triples where an endpoint is typed as "alias" — these should have been rewritten
-		if entityMap[t.Node1] == "alias" || entityMap[t.Node2] == "alias" {
+		srcInfo := entityMap[t.Node1]
+		tgtInfo := entityMap[t.Node2]
+		if (srcInfo != nil && srcInfo.Type == "alias") || (tgtInfo != nil && tgtInfo.Type == "alias") {
 			rejected++
 			continue
 		}
 
-		// Apply entity types
-		if mapType, ok := entityMap[t.Node1]; ok && mapType != "" {
-			t.Node1Type = s.NormalizeEntityType(mapType)
+		// Apply entity types from rich map
+		if srcInfo != nil && srcInfo.Type != "" {
+			t.Node1Type = s.NormalizeEntityType(srcInfo.Type)
 		} else {
 			t.Node1Type = s.NormalizeEntityType(t.Node1Type)
 		}
-		if mapType, ok := entityMap[t.Node2]; ok && mapType != "" {
-			t.Node2Type = s.NormalizeEntityType(mapType)
+		if tgtInfo != nil && tgtInfo.Type != "" {
+			t.Node2Type = s.NormalizeEntityType(tgtInfo.Type)
 		} else {
 			t.Node2Type = s.NormalizeEntityType(t.Node2Type)
 		}
@@ -344,7 +359,6 @@ func (s *Schema) RewriteTriples(triples []models.Triple, entityMap map[string]st
 		// Fix HAS_ROLE target typing: if the target entity was role-rewritten to "person",
 		// the HAS_ROLE triple should still point to type "role"
 		if strings.ToUpper(t.Edge) == "HAS_ROLE" && t.Node2Type == "person" {
-			// The target of HAS_ROLE is a role entity — fix its type
 			t.Node2Type = "role"
 			roleFixed++
 		}
@@ -365,15 +379,30 @@ func (s *Schema) RewriteTriples(triples []models.Triple, entityMap map[string]st
 		if shouldFlip {
 			t.Node1, t.Node2 = t.Node2, t.Node1
 			t.Node1Type, t.Node2Type = t.Node2Type, t.Node1Type
+			srcInfo, tgtInfo = tgtInfo, srcInfo
 			flipped++
 		}
 
-		// Strict relation-level enforcement rules
+		// Strict relation-level enforcement rules (uses domain types)
 		edge := strings.ToUpper(t.Edge)
 		srcBase := s.ResolveBaseType(t.Node1Type)
 		tgtBase := s.ResolveBaseType(t.Node2Type)
+		srcDomain := ""
+		tgtDomain := ""
+		if srcInfo != nil {
+			srcDomain = srcInfo.DomainType
+			if srcBase == "" {
+				srcBase = srcInfo.BaseType
+			}
+		}
+		if tgtInfo != nil {
+			tgtDomain = tgtInfo.DomainType
+			if tgtBase == "" {
+				tgtBase = tgtInfo.BaseType
+			}
+		}
 
-		if !applyRelationEnforcement(edge, srcBase, tgtBase, &t) {
+		if !applyRelationEnforcementRich(edge, srcBase, tgtBase, srcDomain, tgtDomain, &t) {
 			rejected++
 			continue
 		}
@@ -413,39 +442,35 @@ func (s *Schema) RewriteTriples(triples []models.Triple, entityMap map[string]st
 	return result
 }
 
-// applyRelationEnforcement applies hard-coded semantic rules for specific relations.
+// applyRelationEnforcementRich applies semantic rules using both base and domain types.
 // Returns false if the triple should be rejected entirely.
-func applyRelationEnforcement(edge, srcBase, tgtBase string, t *models.Triple) bool {
+func applyRelationEnforcementRich(edge, srcBase, tgtBase, srcDomain, tgtDomain string, t *models.Triple) bool {
 	switch edge {
 	case "OFFERS", "PROVIDES":
 		// Target must be service-like. Source must be organization-like.
 		if tgtBase != "" && tgtBase != "service" && tgtBase != "product" {
-			// Target is not a service — reject
 			return false
 		}
 		if srcBase == "person" || srcBase == "location" || srcBase == "role" {
-			// Person/location/role cannot offer services
 			return false
 		}
 
 	case "PART_OF", "BELONGS_TO":
-		// Must be child → parent (smaller entity → larger entity)
-		// If both are organizations, try to detect direction issues
 		if srcBase != "" && tgtBase != "" {
-			// Location cannot be PART_OF an organization (use LOCATED_IN)
 			if srcBase == "location" && tgtBase == "organization" {
 				return false
 			}
-			// Person cannot be PART_OF anything (use WORKS_AT/BASED_AT)
 			if srcBase == "person" {
 				return false
 			}
 		}
+		// If branch PART_OF branch (same domain level), reject
+		if isBranchDomain(srcDomain) && isBranchDomain(tgtDomain) {
+			return false
+		}
 
 	case "LOCATED_IN", "LOCATED_AT":
-		// Target must be location or address. Source must not be person.
 		if tgtBase != "" && tgtBase != "location" && tgtBase != "address" {
-			// If source is location/address and target isn't, try flipping
 			if srcBase == "location" || srcBase == "address" {
 				t.Node1, t.Node2 = t.Node2, t.Node1
 				t.Node1Type, t.Node2Type = t.Node2Type, t.Node1Type
@@ -454,14 +479,11 @@ func applyRelationEnforcement(edge, srcBase, tgtBase string, t *models.Triple) b
 			return false
 		}
 		if srcBase == "person" {
-			// Person uses BASED_AT/WORKS_AT, not LOCATED_IN
 			return false
 		}
 
 	case "HAS_ROLE":
-		// Source must be person, target must be role
 		if srcBase != "" && srcBase != "person" {
-			// If target is person and source is role, flip
 			if tgtBase == "person" && srcBase == "role" {
 				t.Node1, t.Node2 = t.Node2, t.Node1
 				t.Node1Type, t.Node2Type = t.Node2Type, t.Node1Type
@@ -474,18 +496,43 @@ func applyRelationEnforcement(edge, srcBase, tgtBase string, t *models.Triple) b
 		}
 
 	case "OPERATES", "HAS_BRANCH":
-		// OPERATES: parent org → child org/branch
-		// Both should be organizations. If child→parent detected, flip.
+		// OPERATES: parent/network org → child/branch org
+		// Use domain types to determine direction, not name heuristics
 		if srcBase == "organization" && tgtBase == "organization" {
-			// Use name heuristics: if target name contains source name prefix, it's likely child→parent (wrong)
-			srcLower := strings.ToLower(t.Node1)
-			tgtLower := strings.ToLower(t.Node2)
-			// If source looks like a branch name (shorter, subset of target), flip
-			if len(srcLower) < len(tgtLower) && strings.Contains(tgtLower, strings.Fields(srcLower)[0]) {
-				// Source is shorter/less specific — likely branch→network, flip
+			srcIsNetwork := isNetworkDomain(srcDomain)
+			srcIsBranch := isBranchDomain(srcDomain)
+			tgtIsNetwork := isNetworkDomain(tgtDomain)
+			tgtIsBranch := isBranchDomain(tgtDomain)
+
+			// branch → network is wrong direction — flip
+			if srcIsBranch && tgtIsNetwork {
 				t.Node1, t.Node2 = t.Node2, t.Node1
 				t.Node1Type, t.Node2Type = t.Node2Type, t.Node1Type
 				return true
+			}
+			// network → branch is correct
+			if srcIsNetwork && tgtIsBranch {
+				return true
+			}
+			// branch → branch (same level) — reject
+			if srcIsBranch && tgtIsBranch {
+				return false
+			}
+			// Neither has domain type info — fall back to name containment heuristic
+			if !srcIsNetwork && !srcIsBranch && !tgtIsNetwork && !tgtIsBranch {
+				// If target name contains a common prefix with source and is longer, likely correct
+				// If source is longer (more specific), it's probably the branch → flip
+				srcLower := strings.ToLower(t.Node1)
+				tgtLower := strings.ToLower(t.Node2)
+				srcWords := strings.Fields(srcLower)
+				tgtWords := strings.Fields(tgtLower)
+				// Branch names tend to be longer/more specific than network names
+				if len(srcWords) > len(tgtWords) && len(tgtWords) > 0 && strings.Contains(srcLower, tgtWords[0]) {
+					// Source is longer and contains target's first word — source is branch, flip
+					t.Node1, t.Node2 = t.Node2, t.Node1
+					t.Node1Type, t.Node2Type = t.Node2Type, t.Node1Type
+					return true
+				}
 			}
 		}
 		if srcBase == "person" || srcBase == "role" || srcBase == "service" {
@@ -493,10 +540,7 @@ func applyRelationEnforcement(edge, srcBase, tgtBase string, t *models.Triple) b
 		}
 
 	case "MANAGES", "MANAGED_BY":
-		// MANAGES: person → organization (or person → person for team leads)
-		// Source must be person
 		if edge == "MANAGES" && srcBase != "" && srcBase != "person" {
-			// If target is person, flip
 			if tgtBase == "person" {
 				t.Node1, t.Node2 = t.Node2, t.Node1
 				t.Node1Type, t.Node2Type = t.Node2Type, t.Node1Type
@@ -507,6 +551,34 @@ func applyRelationEnforcement(edge, srcBase, tgtBase string, t *models.Triple) b
 	}
 
 	return true
+}
+
+// isNetworkDomain returns true if the domain type indicates a parent/network organization.
+func isNetworkDomain(domain string) bool {
+	if domain == "" {
+		return false
+	}
+	d := strings.ToLower(domain)
+	return strings.Contains(d, "network") ||
+		strings.Contains(d, "parent") ||
+		strings.Contains(d, "group") ||
+		strings.Contains(d, "holding") ||
+		strings.Contains(d, "corporation")
+}
+
+// isBranchDomain returns true if the domain type indicates a branch/unit/facility.
+func isBranchDomain(domain string) bool {
+	if domain == "" {
+		return false
+	}
+	d := strings.ToLower(domain)
+	return strings.Contains(d, "branch") ||
+		strings.Contains(d, "clinic") ||
+		strings.Contains(d, "facility") ||
+		strings.Contains(d, "unit") ||
+		strings.Contains(d, "center") ||
+		strings.Contains(d, "hub") ||
+		strings.Contains(d, "office")
 }
 
 // isRoleBaseType checks if an entity type is role-like (base_type is "role").
