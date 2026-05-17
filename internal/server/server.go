@@ -361,7 +361,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if info.IsDir() {
-			if err := s.pipeline.IngestDirectory(req.Path); err != nil {
+			if err := s.pipeline.IngestDir(req.Path); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
@@ -371,7 +371,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			if err := s.pipeline.IngestText(string(data), req.Path); err != nil {
+			if err := s.pipeline.IngestRawText(string(data), req.Path); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
@@ -381,7 +381,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		if source == "" {
 			source = "api"
 		}
-		if err := s.pipeline.IngestText(req.Text, source); err != nil {
+		if err := s.pipeline.IngestRawText(req.Text, source); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
