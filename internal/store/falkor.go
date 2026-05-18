@@ -174,6 +174,15 @@ func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 		extraCreate += fmt.Sprintf(", r.condition = '%s'", conditionStr)
 	}
 
+	// Build optional ON MATCH SET clauses for status and condition
+	extraMatch := ""
+	if statusStr != "" {
+		extraMatch += fmt.Sprintf(", r.status = CASE WHEN r.status IS NULL OR r.status = '' THEN '%s' ELSE r.status END", statusStr)
+	}
+	if conditionStr != "" {
+		extraMatch += fmt.Sprintf(", r.condition = CASE WHEN r.condition IS NULL OR r.condition = '' THEN '%s' WHEN r.condition CONTAINS '%s' THEN r.condition ELSE r.condition + '\\n---\\n' + '%s' END", conditionStr, conditionStr, conditionStr)
+	}
+
 	cypher := fmt.Sprintf(
 		`MERGE (a:Concept {name: '%s'})
 		 ON CREATE SET a.name = '%s'
@@ -181,12 +190,12 @@ func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 		 ON CREATE SET b.name = '%s'%s
 		 MERGE (a)-[r:%s]->(b)
 		 ON CREATE SET r.description = '%s', r.weight = %f, r.inferred = %t, r.chunk_ids = '%s', r.evidence = '%s'%s
-		 ON MATCH SET r.weight = r.weight + %f, r.chunk_ids = r.chunk_ids + ',%s', r.evidence = CASE WHEN r.evidence CONTAINS '%s' THEN r.evidence ELSE r.evidence + '\n---\n' + '%s' END`,
+		 ON MATCH SET r.weight = r.weight + %f, r.chunk_ids = r.chunk_ids + ',%s', r.evidence = CASE WHEN r.evidence CONTAINS '%s' THEN r.evidence ELSE r.evidence + '\n---\n' + '%s' END%s`,
 		n1, n1,
 		n2, n2, typeSetClause,
 		edgeType, edgeDesc,
 		record.Weight, record.Inferred, strings.Join(record.ChunkIDs, ","), evidenceStr, extraCreate,
-		record.Weight, strings.Join(record.ChunkIDs, ","), evidenceStr, evidenceStr,
+		record.Weight, strings.Join(record.ChunkIDs, ","), evidenceStr, evidenceStr, extraMatch,
 	)
 
 	_, err := s.Query(cypher)
