@@ -79,7 +79,9 @@ IMPORTANT RULES:
       "to_mention": "entity name",
       "evidence_text": "exact sentence from text supporting this fact",
       "evidence_language": "en",
-      "confidence": 0.85
+      "confidence": 0.85,
+      "status": "active | planned | backup | conditional | historical | unknown",
+      "condition": "empty string unless the fact depends on if/when/during/unless — then describe the condition"
     }
   ]
 }`, baseTypes, roles, statuses, relations)
@@ -122,6 +124,8 @@ func ExtractWithSchema(client *Client, text string, chunkID string) ([]models.Ca
 			EvidenceText     string  `json:"evidence_text"`
 			EvidenceLanguage string  `json:"evidence_language"`
 			Confidence       float64 `json:"confidence"`
+			Status           string  `json:"status"`
+			Condition        string  `json:"condition"`
 		} `json:"edges"`
 	}
 
@@ -212,7 +216,7 @@ func ExtractWithSchema(client *Client, text string, chunkID string) ([]models.Ca
 			schemaFit = 0.3 // unknown relation penalty
 		}
 
-		edges = append(edges, models.CandidateEdge{
+		edge := models.CandidateEdge{
 			ID:             fmt.Sprintf("e_%s_%d", chunkID, i),
 			FromMention:    from,
 			RelationRaw:    rawRelation,
@@ -224,7 +228,21 @@ func ExtractWithSchema(client *Client, text string, chunkID string) ([]models.Ca
 			EvidenceScore:  e.Confidence,
 			SchemaFitScore: schemaFit,
 			Confidence:     e.Confidence,
-		})
+		}
+
+		// Parse edge status
+		status := strings.ToLower(strings.TrimSpace(e.Status))
+		if status != "" && schema.IsValidEdgeStatus(status) {
+			edge.Status = status
+		}
+
+		// Parse edge condition
+		cond := strings.TrimSpace(e.Condition)
+		if cond != "" {
+			edge.Condition = cond
+		}
+
+		edges = append(edges, edge)
 	}
 
 	return entities, edges, nil

@@ -1,6 +1,7 @@
 package solver
 
 import (
+	"regexp"
 	"strings"
 
 	"rediskg/internal/schema"
@@ -41,37 +42,47 @@ func checkAllConstraints(
 	entities map[string]*models.CanonicalEntity,
 	aliasMap map[string]string,
 ) HardConstraintResult {
-	// Constraint 1: Document titles cannot become business entities
+	// Constraint 1: Raw value endpoints (dates, times) cannot be graph nodes
+	if r := checkRawValueEndpoint(edge); !r.Pass {
+		return r
+	}
+
+	// Constraint 2: Document titles cannot become business entities
 	if r := checkDocumentTitle(edge, entities); !r.Pass {
 		return r
 	}
 
-	// Constraint 2: Planned entities cannot have active-only relations
+	// Constraint 3: Planned entities cannot have active-only relations
 	if r := checkPlannedStatus(edge, entities); !r.Pass {
 		return r
 	}
 
-	// Constraint 3: Internal branches cannot partner with parent
+	// Constraint 4: Internal branches cannot partner with parent
 	if r := checkBranchPartnership(edge, entities); !r.Pass {
 		return r
 	}
 
-	// Constraint 4: Deputy managers cannot be main managers
+	// Constraint 5: Deputy managers cannot be main managers
 	if r := checkDeputyManager(edge, entities); !r.Pass {
 		return r
 	}
 
-	// Constraint 5: Alias endpoints cannot own normal facts
+	// Constraint 6: Alias endpoints cannot own normal facts
 	if r := checkAliasEndpoint(edge, aliasMap); !r.Pass {
 		return r
 	}
 
-	// Constraint 6: Relation signature must match schema (base types)
+	// Constraint 7: ALIAS_OF must have compatible types and non-generic target
+	if r := checkAliasCompatibility(edge, entities); !r.Pass {
+		return r
+	}
+
+	// Constraint 8: Relation signature must match schema (base types)
 	if r := checkRelationSignature(edge, entities); !r.Pass {
 		return r
 	}
 
-	// Constraint 7: Relation must satisfy functional role rules
+	// Constraint 9: Relation must satisfy functional role rules
 	if r := checkRelationRoles(edge, entities); !r.Pass {
 		return r
 	}
@@ -332,4 +343,100 @@ func containsStr(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// checkRawValueEndpoint rejects edges whose endpoints look like raw temporal/quantity values.
+// These slip through when the entity filter runs before edge rewriting.
+func checkRawValueEndpoint(edge models.CandidateEdge) HardConstraintResult {
+	for _, endpoint := range []string{edge.FromMention, edge.ToMention} {
+		name := strings.ToLower(strings.TrimSpace(endpoint))
+		if looksLikeRawTemporalValue(name) {
+			return HardConstraintResult{
+				Pass:   false,
+				Reason: "raw value endpoint '" + endpoint + "' is not a valid entity",
+			}
+		}
+	}
+	return HardConstraintResult{Pass: true}
+}
+
+// looksLikeRawTemporalValue checks if a mention looks like a date, time, day-of-week,
+// or schedule fragment that should not be a standalone entity.
+func looksLikeRawTemporalValue(s string) bool {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`^\d{1,2}:\d{2}$`),
+		regexp.MustCompile(`^\d{1,2}:\d{2}\s`),
+		regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`),
+		regexp.MustCompile(`^q[1-4]\s+\d{4}$`),
+		regexp.MustCompile(`^(daily|weekly|monthly|yearly|biweekly)$`),
+		regexp.MustCompile(`^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b`),
+		regexp.MustCompile(`^(twice|once|three times)\s+per\s+(day|week|month|year)$`),
+		regexp.MustCompile(`\b\d+\s+(business\s+)?days?\b`),
+		regexp.MustCompile(`at least .* days? in advance`),
+		regexp.MustCompile(`^\d+\s*(am|pm)$`),
+		regexp.MustCompile(`^every\s+`),
+	}
+
+	for _, p := range patterns {
+		if p.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkAliasCompatibility rejects ALIAS_OF edges with incompatible types or generic targets.
+func checkAliasCompatibility(edge models.CandidateEdge, entities map[string]*models.CanonicalEntity) HardConstraintResult {
+	if edge.RelationID != "ALIAS_OF" {
+		return HardConstraintResult{Pass: true}
+	}
+
+	fromEnt := entities[edge.FromMention]
+	toEnt := entities[edge.ToMention]
+	if fromEnt == nil || toEnt == nil {
+		return HardConstraintResult{Pass: true}
+	}
+
+	// Base types must overlap
+	if !hasCompatibleBaseTypes(fromEnt.BaseTypes, toEnt.BaseTypes) {
+		return HardConstraintResult{
+			Pass:   false,
+			Reason: "ALIAS_OF incompatible base types: " + edge.FromMention + " (" + strings.Join(fromEnt.BaseTypes, ",") + ") -> " + edge.ToMention + " (" + strings.Join(toEnt.BaseTypes, ",") + ")",
+		}
+	}
+
+	// Target must not be a generic single-word entity
+	if isGenericAliasTarget(edge.ToMention) {
+		return HardConstraintResult{
+			Pass:   false,
+			Reason: "ALIAS_OF target is too generic: " + edge.ToMention,
+		}
+	}
+
+	return HardConstraintResult{Pass: true}
+}
+
+// hasCompatibleBaseTypes checks if two type lists share at least one type.
+func hasCompatibleBaseTypes(a, b []string) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if x == y {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isGenericAliasTarget returns true if the name is a single generic word
+// that should not be the target of an ALIAS_OF relation.
+func isGenericAliasTarget(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	generic := map[string]bool{
+		"diagnostics": true, "services": true, "system": true,
+		"portal": true, "branch": true, "clinic": true,
+		"laboratory": true, "center": true, "office": true,
+		"department": true, "unit": true, "site": true,
+	}
+	return generic[name]
 }

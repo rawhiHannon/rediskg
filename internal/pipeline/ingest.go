@@ -3,6 +3,7 @@ package pipeline
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -45,7 +46,7 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 		return fmt.Errorf("no entities extracted from documents")
 	}
 
-	// Phase 2b: Filter raw value entities (dates, times, quantities)
+	// Phase 2b: Filter raw value entities (dates, times, quantities — type + regex)
 	preFilter := len(candidateGraph.Entities)
 	candidateGraph.Entities = filterRawValueEntities(candidateGraph.Entities)
 	if preFilter != len(candidateGraph.Entities) {
@@ -53,63 +54,82 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 			preFilter-len(candidateGraph.Entities), len(candidateGraph.Entities))
 	}
 
+	// Phase 2c: Remove edges whose endpoints were filtered
+	preOrphan := len(candidateGraph.Edges)
+	candidateGraph.Edges = filterOrphanEdges(candidateGraph.Edges, candidateGraph.Entities)
+	if preOrphan != len(candidateGraph.Edges) {
+		log.Printf("  Filtered %d orphan edges (%d remaining)",
+			preOrphan-len(candidateGraph.Edges), len(candidateGraph.Edges))
+	}
+
 	// Phase 3: Group aliases and deduplicate entity mentions
-	log.Println("[3/10] Grouping aliases...")
+	log.Println("[3/14] Grouping aliases...")
 	aliasMap := buildAliasMap(candidateGraph.Entities)
 	log.Printf("  Found %d alias mappings", len(aliasMap))
 
 	// Phase 4: Select canonical entities (merge duplicates, pick best types)
-	log.Println("[4/10] Selecting canonical entities...")
+	log.Println("[4/14] Selecting canonical entities...")
 	canonicalEntities := selectCanonicalEntities(candidateGraph.Entities, aliasMap)
 	log.Printf("  %d canonical entities", len(canonicalEntities))
 
+	// Phase 4b: Fix event entity statuses (incidents != planned)
+	fixEntityStatuses(canonicalEntities)
+
 	// Phase 5: Rewrite all edges to canonical entity names
-	log.Println("[5/10] Rewriting edges to canonical entities...")
+	log.Println("[5/14] Rewriting edges to canonical entities...")
 	candidateGraph.Edges = rewriteEdgesToCanonical(candidateGraph.Edges, aliasMap)
 
 	// Phase 6: Normalize relation names to stable internal IDs
-	log.Println("[6/10] Normalizing relations...")
+	log.Println("[6/14] Normalizing relations...")
 	candidateGraph.Edges = normalizeRelations(candidateGraph.Edges)
 	log.Printf("  %d edges after normalization", len(candidateGraph.Edges))
 
-	// Phase 6b: Status-aware edge rewriting
-	log.Println("[6b/11] Rewriting status-aware edges...")
+	// Phase 7: Deterministic negation fix (evidence-based relation correction)
+	log.Println("[7/14] Fixing negated relations from evidence...")
+	candidateGraph.Edges = fixNegatedRelations(candidateGraph.Edges)
+
+	// Phase 8: Deterministic conditional annotation (evidence-based status/condition)
+	log.Println("[8/14] Annotating conditional edges from evidence...")
+	candidateGraph.Edges = annotateConditionalEdges(candidateGraph.Edges)
+
+	// Phase 9: Status-aware edge rewriting
+	log.Println("[9/14] Rewriting status-aware edges...")
 	preRewrite := len(candidateGraph.Edges)
 	candidateGraph.Edges = rewriteStatusAwareEdges(candidateGraph.Edges, canonicalEntities)
 	log.Printf("  Status rewriting: %d -> %d edges", preRewrite, len(candidateGraph.Edges))
 
-	// Phase 7: Build alternative/conflict groups
-	log.Println("[7/11] Building alternative groups...")
+	// Phase 10: Build alternative/conflict groups
+	log.Println("[10/14] Building alternative groups...")
 	candidateGraph.Edges = solver.BuildAlternativeGroups(candidateGraph.Edges)
 
-	// Phase 8: Apply hard constraints
-	log.Println("[8/10] Applying hard constraints...")
+	// Phase 11: Apply hard constraints
+	log.Println("[11/14] Applying hard constraints...")
 	preCount := len(candidateGraph.Edges)
 	candidateGraph.Edges = solver.ApplyHardConstraints(
 		candidateGraph.Edges, canonicalEntities, aliasMap,
 	)
 	log.Printf("  Hard constraints: %d -> %d edges", preCount, len(candidateGraph.Edges))
 
-	// Phase 9: Global graph selection
-	log.Println("[9/11] Running global graph selector...")
+	// Phase 12: Global graph selection
+	log.Println("[12/14] Running global graph selector...")
 	finalGraph := solver.SelectFinalGraph(candidateGraph.Edges, canonicalEntities)
 	log.Printf("  Final graph: %d entities, %d edges",
 		len(finalGraph.Entities), len(finalGraph.Edges))
 
-	// Phase 10: Post-solver validation
-	log.Println("[10/12] Post-solver validation...")
+	// Phase 13: Post-solver validation
+	log.Println("[13/14] Post-solver validation...")
 	finalGraph = postSolverValidation(finalGraph, aliasMap)
 	log.Printf("  After validation: %d entities, %d edges",
 		len(finalGraph.Entities), len(finalGraph.Edges))
 
-	// Phase 11: Negative-fact conflict resolution
-	log.Println("[11/12] Resolving negative-fact conflicts...")
+	// Phase 14: Negative-fact conflict resolution
+	log.Println("[14/14] Resolving negative-fact conflicts...")
 	preConflict := len(finalGraph.Edges)
 	finalGraph.Edges = resolveNegativeConflicts(finalGraph.Edges)
 	log.Printf("  Conflict resolution: %d -> %d edges", preConflict, len(finalGraph.Edges))
 
-	// Phase 12: Materialize final KG
-	log.Println("[12/12] Materializing to FalkorDB...")
+	// Materialize final KG
+	log.Println("Materializing to FalkorDB...")
 	if err := p.materializeFinalGraph(finalGraph); err != nil {
 		return fmt.Errorf("materialization failed: %w", err)
 	}
@@ -561,9 +581,13 @@ func rewriteStatusAwareEdges(edges []models.CandidateEdge, entities map[string]*
 func resolveNegativeConflicts(edges []models.KGEdge) []models.KGEdge {
 	// Map of negative relation -> positive relation it overrides
 	negativeOverrides := map[string]string{
-		"DOES_NOT_OFFER":  "OFFERS",
-		"DOES_NOT_WORK_AT": "BASED_AT",
-		"NO_CONTRACT_WITH": "CONTRACTED_WITH",
+		"DOES_NOT_OFFER":                   "OFFERS",
+		"DOES_NOT_WORK_AT":                 "BASED_AT",
+		"NO_CONTRACT_WITH":                 "CONTRACTED_WITH",
+		"DOES_NOT_HANDLE_BILLING_FOR":      "HANDLES_BILLING_FOR",
+		"DOES_NOT_HANDLE_CLAIMS_FOR":       "HANDLES_BILLING_FOR",
+		"DOES_NOT_HANDLE_REIMBURSEMENT_FOR":"HANDLES_REIMBURSEMENT_FOR",
+		"DOES_NOT_PROCESS_TESTS_FOR":       "PROCESSES_TESTS_FOR",
 	}
 
 	// Build set of (from, to) pairs with negative facts
@@ -609,6 +633,7 @@ func filterRawValueEntities(entities []models.CandidateEntity) []models.Candidat
 }
 
 // isRawValueEntity checks if an entity is a raw date/time/quantity value.
+// Uses both type-based and regex-based detection.
 func isRawValueEntity(e models.CandidateEntity) bool {
 	rawTypes := map[string]bool{
 		"date_time": true, "quantity": true, "money": true, "identifier": true,
@@ -619,6 +644,13 @@ func isRawValueEntity(e models.CandidateEntity) bool {
 			return true
 		}
 	}
+
+	// Regex fallback: catch temporal values typed as "concept" or other non-raw types
+	name := strings.ToLower(strings.TrimSpace(e.Mention))
+	if looksLikeRawTemporalValue(name) {
+		return true
+	}
+
 	return false
 }
 
@@ -629,4 +661,194 @@ func containsStr(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// containsAny checks if s contains any of the substrings.
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// fixNegatedRelations detects evidence negation and flips positive relations to negative.
+// Runs before hard constraints so the solver sees correct relation IDs.
+func fixNegatedRelations(edges []models.CandidateEdge) []models.CandidateEdge {
+	negationPhrases := []string{
+		"does not handle", "doesn't handle", "do not handle",
+		"not handle", "does not manage", "not responsible for",
+		"does not cover", "doesn't cover", "not covered",
+		"does not process", "doesn't process",
+	}
+
+	for i := range edges {
+		e := &edges[i]
+		ev := strings.ToLower(e.EvidenceText)
+
+		if !containsAny(ev, negationPhrases) {
+			continue
+		}
+
+		switch e.RelationID {
+		case "HANDLES_BILLING_FOR":
+			e.RelationID = "DOES_NOT_HANDLE_BILLING_FOR"
+		case "HANDLES_REIMBURSEMENT_FOR":
+			e.RelationID = "DOES_NOT_HANDLE_REIMBURSEMENT_FOR"
+		case "OFFERS":
+			e.RelationID = "DOES_NOT_OFFER"
+		case "PROCESSES_TESTS_FOR":
+			e.RelationID = "DOES_NOT_PROCESS_TESTS_FOR"
+		case "CONTRACTED_WITH":
+			e.RelationID = "NO_CONTRACT_WITH"
+		}
+	}
+	return edges
+}
+
+// annotateConditionalEdges detects conditional/backup evidence and sets edge status/condition.
+// Runs after fixNegatedRelations so negated edges are already corrected.
+func annotateConditionalEdges(edges []models.CandidateEdge) []models.CandidateEdge {
+	conditionalTriggers := []string{
+		"if ", "when ", "during ", "unless ", "in case",
+	}
+	backupTriggers := []string{
+		"downtime", "redirected", "backup", "fallback",
+		"urgent samples", "unavailable", "emergency",
+	}
+
+	for i := range edges {
+		e := &edges[i]
+		ev := strings.ToLower(e.EvidenceText)
+
+		if !containsAny(ev, append(conditionalTriggers, backupTriggers...)) {
+			continue
+		}
+
+		// Determine status
+		if containsAny(ev, backupTriggers) {
+			if e.Status == "" || e.Status == "active" {
+				e.Status = "backup"
+			}
+		} else if e.Status == "" || e.Status == "active" {
+			e.Status = "conditional"
+		}
+
+		// Extract condition phrase if not already set
+		if e.Condition == "" {
+			e.Condition = extractConditionPhrase(e.EvidenceText)
+		}
+	}
+	return edges
+}
+
+// extractConditionPhrase extracts the conditional clause from evidence text.
+func extractConditionPhrase(evidence string) string {
+	lower := strings.ToLower(evidence)
+
+	// Try to find "if ...", "when ...", "during ...", "unless ..." clauses
+	prefixes := []string{"if ", "when ", "during ", "unless ", "in case "}
+	for _, prefix := range prefixes {
+		idx := strings.Index(lower, prefix)
+		if idx < 0 {
+			continue
+		}
+		// Extract from the prefix to the next sentence boundary
+		rest := evidence[idx:]
+		// Find end: comma, period, semicolon, or end of string
+		endIdx := len(rest)
+		for _, delim := range []string{",", ".", ";", " – ", " — "} {
+			if pos := strings.Index(rest[len(prefix):], delim); pos >= 0 && pos+len(prefix) < endIdx {
+				endIdx = pos + len(prefix)
+			}
+		}
+		phrase := strings.TrimSpace(rest[:endIdx])
+		if len(phrase) > 10 { // must be meaningful
+			return phrase
+		}
+	}
+	return ""
+}
+
+// filterOrphanEdges removes edges whose endpoints were filtered out (e.g., raw value entities).
+func filterOrphanEdges(edges []models.CandidateEdge, entities []models.CandidateEntity) []models.CandidateEdge {
+	entitySet := make(map[string]bool, len(entities))
+	for _, e := range entities {
+		mention := strings.ToLower(strings.TrimSpace(e.Mention))
+		canonical := strings.ToLower(strings.TrimSpace(e.CanonicalName))
+		if mention != "" {
+			entitySet[mention] = true
+		}
+		if canonical != "" {
+			entitySet[canonical] = true
+		}
+	}
+
+	var result []models.CandidateEdge
+	for _, e := range edges {
+		if entitySet[e.FromMention] && entitySet[e.ToMention] {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// looksLikeRawTemporalValue checks if a mention looks like a date, time, day-of-week,
+// or schedule fragment that should not be a standalone entity.
+func looksLikeRawTemporalValue(s string) bool {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`^\d{1,2}:\d{2}$`),                                  // 10:00
+		regexp.MustCompile(`^\d{1,2}:\d{2}\s`),                                 // 13:00 every business day
+		regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`),                              // 2024-11-06
+		regexp.MustCompile(`^q[1-4]\s+\d{4}$`),                                 // q4 2026
+		regexp.MustCompile(`^(daily|weekly|monthly|yearly|biweekly)$`),          // monthly
+		regexp.MustCompile(`^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b`), // tuesday ...
+		regexp.MustCompile(`^(twice|once|three times)\s+per\s+(day|week|month|year)$`),
+		regexp.MustCompile(`\b\d+\s+(business\s+)?days?\b`),                     // 3 business days
+		regexp.MustCompile(`at least .* days? in advance`),
+		regexp.MustCompile(`^\d+\s*(am|pm)$`),                                   // 8am
+		regexp.MustCompile(`^every\s+`),                                          // every monday
+	}
+
+	for _, p := range patterns {
+		if p.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// fixEntityStatuses corrects entity statuses based on evidence.
+// Events with past-tense evidence should not be "planned".
+func fixEntityStatuses(entities map[string]*models.CanonicalEntity) {
+	for _, ent := range entities {
+		if !containsStr(ent.BaseTypes, "event") {
+			continue
+		}
+
+		ev := joinEvidence(ent.Evidence)
+		lower := strings.ToLower(ev)
+
+		if ent.Status == "planned" || ent.Status == "unknown" {
+			if containsAny(lower, []string{
+				"occurred on", "occurred at", "incident",
+				"was reported", "happened on", "took place",
+				"was resolved", "was completed",
+			}) {
+				ent.Status = "historical"
+			}
+		}
+	}
+}
+
+// joinEvidence concatenates all evidence text for an entity.
+func joinEvidence(refs []models.EvidenceRef) string {
+	var parts []string
+	for _, r := range refs {
+		if r.Text != "" {
+			parts = append(parts, r.Text)
+		}
+	}
+	return strings.Join(parts, " ")
 }

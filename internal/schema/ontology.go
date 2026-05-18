@@ -63,8 +63,24 @@ var PredefinedStatuses = []string{
 	"inactive",    // temporarily not operating
 	"former",      // no longer exists or operates
 	"prospective", // under consideration
+	"historical",  // past event that already occurred
+	"completed",   // finished/resolved
+	"resolved",    // resolved incident/issue
 	"unknown",     // status not determinable from evidence
 }
+
+// PredefinedEdgeStatuses defines valid statuses for edges/facts.
+var PredefinedEdgeStatuses = []string{
+	"active",      // currently true
+	"planned",     // will be true in the future
+	"backup",      // true only as a fallback
+	"conditional", // true only under specific conditions
+	"historical",  // was true in the past
+	"unknown",     // status unclear
+}
+
+// EdgeStatusSet is a lookup set for fast validation.
+var EdgeStatusSet map[string]bool
 
 // StatusSet is a lookup set for fast validation.
 var StatusSet map[string]bool
@@ -94,6 +110,11 @@ func init() {
 	StatusSet = make(map[string]bool, len(PredefinedStatuses))
 	for _, s := range PredefinedStatuses {
 		StatusSet[s] = true
+	}
+
+	EdgeStatusSet = make(map[string]bool, len(PredefinedEdgeStatuses))
+	for _, s := range PredefinedEdgeStatuses {
+		EdgeStatusSet[s] = true
 	}
 
 	RelationRules = map[string]RelationRule{
@@ -153,6 +174,11 @@ func IsValidFunctionalRole(r string) bool {
 // IsValidStatus checks if a status is in the controlled vocabulary.
 func IsValidStatus(s string) bool {
 	return StatusSet[s]
+}
+
+// IsValidEdgeStatus checks if an edge status is in the controlled vocabulary.
+func IsValidEdgeStatus(s string) bool {
+	return EdgeStatusSet[s]
 }
 
 // GetRelationRule returns the functional-role validation rule for a relation, or nil.
@@ -238,6 +264,10 @@ var PredefinedRelations = []RelationFamily{
 			{ID: "CONTRACTED_WITH", Description: "Entity has a contract with another", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}, Symmetric: true},
 			{ID: "HAS_AGREEMENT_WITH", Description: "Entity has agreement with another", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}, Symmetric: true},
 			{ID: "NO_CONTRACT_WITH", Description: "Explicitly no contract between entities", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}, Symmetric: true},
+			{ID: "DOES_NOT_HANDLE_BILLING_FOR", Description: "Explicitly does not handle billing for org (negative fact)", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
+			{ID: "DOES_NOT_HANDLE_REIMBURSEMENT_FOR", Description: "Explicitly does not handle reimbursement (negative fact)", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
+			{ID: "DOES_NOT_HANDLE_CLAIMS_FOR", Description: "Explicitly does not handle claims for org (negative fact)", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
+			{ID: "DOES_NOT_PROCESS_TESTS_FOR", Description: "Explicitly does not process tests for org (negative fact)", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
 			{ID: "EVALUATING_PARTNERSHIP_WITH", Description: "Considering partnership", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
 		},
 	},
@@ -340,6 +370,13 @@ func init() {
 		"HANDLES_CORPORATE_PANELS_FOR":"PROCESSES_CORPORATE_PANELS_FOR",
 		"COURIER_FOR":                 "TRANSPORTS_SAMPLES_FOR",
 		"BILLS_FOR":                   "HANDLES_BILLING_FOR",
+
+		// Negative partner operations
+		"DOES_NOT_BILL_FOR":       "DOES_NOT_HANDLE_BILLING_FOR",
+		"NOT_BILLING_FOR":         "DOES_NOT_HANDLE_BILLING_FOR",
+		"DOES_NOT_REIMBURSE_FOR":  "DOES_NOT_HANDLE_REIMBURSEMENT_FOR",
+		"DOES_NOT_CLAIM_FOR":      "DOES_NOT_HANDLE_CLAIMS_FOR",
+		"NOT_PROCESSING_TESTS_FOR":"DOES_NOT_PROCESS_TESTS_FOR",
 
 		// Technology
 		"CONNECTED_TO":   "INTEGRATED_WITH",

@@ -328,3 +328,225 @@ func TestNormalizeRelations_RemovesSelfLoops(t *testing.T) {
 		t.Errorf("expected 1 edge after self-loop removal, got %d", len(result))
 	}
 }
+
+// --- Negation fix tests ---
+
+func TestFixNegatedRelations_FlipsBillingFromEvidence(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "balancecare",
+			RelationID:   "HANDLES_BILLING_FOR",
+			ToMention:    "haifa central",
+			EvidenceText: "It does not handle Haifa Central claims.",
+		},
+		{
+			FromMention:  "balancecare",
+			RelationID:   "HANDLES_BILLING_FOR",
+			ToMention:    "tel aviv",
+			EvidenceText: "BalanceCare handles Tel Aviv billing.",
+		},
+	}
+
+	result := fixNegatedRelations(edges)
+
+	if result[0].RelationID != "DOES_NOT_HANDLE_BILLING_FOR" {
+		t.Errorf("expected negated evidence to flip to DOES_NOT_HANDLE_BILLING_FOR, got %q", result[0].RelationID)
+	}
+	if result[1].RelationID != "HANDLES_BILLING_FOR" {
+		t.Errorf("expected positive evidence to keep HANDLES_BILLING_FOR, got %q", result[1].RelationID)
+	}
+}
+
+func TestFixNegatedRelations_FlipsOffersFromEvidence(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "branch_a",
+			RelationID:   "OFFERS",
+			ToMention:    "dermatology",
+			EvidenceText: "Branch A does not handle dermatology services.",
+		},
+	}
+
+	result := fixNegatedRelations(edges)
+
+	if result[0].RelationID != "DOES_NOT_OFFER" {
+		t.Errorf("expected DOES_NOT_OFFER, got %q", result[0].RelationID)
+	}
+}
+
+// --- Conditional annotation tests ---
+
+func TestAnnotateConditionalEdges_BackupDetection(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "northlab",
+			RelationID:   "PROCESSES_TESTS_FOR",
+			ToMention:    "cedargate",
+			EvidenceText: "NorthLab processes tests for CedarGate during Al-Amal downtime.",
+		},
+	}
+
+	result := annotateConditionalEdges(edges)
+
+	if result[0].Status != "backup" {
+		t.Errorf("expected status 'backup', got %q", result[0].Status)
+	}
+	if result[0].Condition == "" {
+		t.Error("expected condition phrase to be extracted")
+	}
+}
+
+func TestAnnotateConditionalEdges_ConditionalDetection(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "lab_a",
+			RelationID:   "TRANSPORTS_SAMPLES_FOR",
+			ToMention:    "lab_b",
+			EvidenceText: "If Lab A cannot process in time, samples are sent to Lab B.",
+		},
+	}
+
+	result := annotateConditionalEdges(edges)
+
+	if result[0].Status != "conditional" {
+		t.Errorf("expected status 'conditional', got %q", result[0].Status)
+	}
+}
+
+func TestAnnotateConditionalEdges_DoesNotTouchNonConditional(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "org_a",
+			RelationID:   "OFFERS",
+			ToMention:    "pediatrics",
+			EvidenceText: "Org A offers pediatrics services.",
+		},
+	}
+
+	result := annotateConditionalEdges(edges)
+
+	if result[0].Status != "" {
+		t.Errorf("expected empty status for non-conditional edge, got %q", result[0].Status)
+	}
+}
+
+// --- Raw value regex filtering tests ---
+
+func TestLooksLikeRawTemporalValue(t *testing.T) {
+	positives := []string{
+		"10:00", "13:00 every business day", "2024-11-06",
+		"q4 2026", "monthly", "tuesday", "twice per month",
+		"every monday", "3 business days",
+	}
+	negatives := []string{
+		"cedargate", "dr. smith", "al-amal laboratory",
+		"primary care", "haifa central",
+	}
+
+	for _, s := range positives {
+		if !looksLikeRawTemporalValue(s) {
+			t.Errorf("expected %q to be detected as raw temporal value", s)
+		}
+	}
+	for _, s := range negatives {
+		if looksLikeRawTemporalValue(s) {
+			t.Errorf("expected %q to NOT be detected as raw temporal value", s)
+		}
+	}
+}
+
+func TestFilterRawValueEntities_RegexFallback(t *testing.T) {
+	// Entities typed as "concept" but are actually temporal values
+	entities := []models.CandidateEntity{
+		{Mention: "cedargate", BaseTypes: []models.ScoredType{{Type: "organization", Score: 0.9}}},
+		{Mention: "tuesday and thursday", BaseTypes: []models.ScoredType{{Type: "concept", Score: 0.6}}},
+		{Mention: "wednesday mornings", BaseTypes: []models.ScoredType{{Type: "concept", Score: 0.5}}},
+		{Mention: "dr. smith", BaseTypes: []models.ScoredType{{Type: "person", Score: 0.9}}},
+	}
+
+	result := filterRawValueEntities(entities)
+
+	for _, e := range result {
+		if e.Mention == "tuesday and thursday" || e.Mention == "wednesday mornings" {
+			t.Errorf("expected %q to be filtered by regex fallback", e.Mention)
+		}
+	}
+}
+
+// --- Orphan edge filtering tests ---
+
+func TestFilterOrphanEdges(t *testing.T) {
+	entities := []models.CandidateEntity{
+		{Mention: "org_a", CanonicalName: "org_a"},
+		{Mention: "org_b", CanonicalName: "org_b"},
+	}
+
+	edges := []models.CandidateEdge{
+		{FromMention: "org_a", RelationID: "OFFERS", ToMention: "org_b"},
+		{FromMention: "org_a", RelationID: "OFFERS", ToMention: "10:00"}, // endpoint was filtered
+	}
+
+	result := filterOrphanEdges(edges, entities)
+
+	if len(result) != 1 {
+		t.Errorf("expected 1 edge after orphan filtering, got %d", len(result))
+	}
+}
+
+// --- Event status correction tests ---
+
+func TestFixEntityStatuses_IncidentNotPlanned(t *testing.T) {
+	entities := map[string]*models.CanonicalEntity{
+		"cg-2025-018": {
+			CanonicalName: "cg-2025-018",
+			BaseTypes:     []string{"event"},
+			Status:        "planned",
+			Evidence: []models.EvidenceRef{
+				{Text: "Incident CG-2025-018 occurred on 2025-01-15"},
+			},
+		},
+		"org_a": {
+			CanonicalName: "org_a",
+			BaseTypes:     []string{"organization"},
+			Status:        "planned",
+		},
+	}
+
+	fixEntityStatuses(entities)
+
+	if entities["cg-2025-018"].Status != "historical" {
+		t.Errorf("expected event with past evidence to be 'historical', got %q", entities["cg-2025-018"].Status)
+	}
+	// Non-event should not be changed
+	if entities["org_a"].Status != "planned" {
+		t.Errorf("expected non-event to keep 'planned', got %q", entities["org_a"].Status)
+	}
+}
+
+// --- Negative conflict resolution with billing ---
+
+func TestResolveNegativeConflicts_BillingOverride(t *testing.T) {
+	edges := []models.KGEdge{
+		{From: "balancecare", RelationID: "HANDLES_BILLING_FOR", To: "haifa"},
+		{From: "balancecare", RelationID: "DOES_NOT_HANDLE_BILLING_FOR", To: "haifa"},
+		{From: "balancecare", RelationID: "HANDLES_BILLING_FOR", To: "tel_aviv"},
+	}
+
+	result := resolveNegativeConflicts(edges)
+
+	for _, e := range result {
+		if e.From == "balancecare" && e.RelationID == "HANDLES_BILLING_FOR" && e.To == "haifa" {
+			t.Error("HANDLES_BILLING_FOR should be removed when DOES_NOT_HANDLE_BILLING_FOR exists")
+		}
+	}
+	// tel_aviv should survive
+	found := false
+	for _, e := range result {
+		if e.To == "tel_aviv" && e.RelationID == "HANDLES_BILLING_FOR" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("unrelated HANDLES_BILLING_FOR should be preserved")
+	}
+}

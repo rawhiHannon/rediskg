@@ -93,3 +93,93 @@ func TestApplyHardConstraints_RejectsBranchPartnership(t *testing.T) {
 		t.Error("PARTNERS_WITH between parent and branch should be rejected")
 	}
 }
+
+// --- Raw value endpoint tests ---
+
+func TestCheckRawValueEndpoint_RejectsTemporalEndpoint(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{FromMention: "org_a", RelationID: "OFFERS", ToMention: "10:00"},
+		{FromMention: "2024-11-06", RelationID: "OCCURRED_ON", ToMention: "org_b"},
+		{FromMention: "org_a", RelationID: "OFFERS", ToMention: "pediatrics"},
+	}
+
+	result := ApplyHardConstraints(edges, map[string]*models.CanonicalEntity{
+		"org_a":      {CanonicalName: "org_a", BaseTypes: []string{"organization"}},
+		"org_b":      {CanonicalName: "org_b", BaseTypes: []string{"organization"}},
+		"pediatrics": {CanonicalName: "pediatrics", BaseTypes: []string{"service"}},
+	}, map[string]string{})
+
+	for _, e := range result {
+		if e.ToMention == "10:00" || e.FromMention == "2024-11-06" {
+			t.Error("raw temporal endpoint should have been rejected")
+		}
+	}
+}
+
+// --- Alias compatibility tests ---
+
+func TestCheckAliasCompatibility_RejectsIncompatibleTypes(t *testing.T) {
+	entities := map[string]*models.CanonicalEntity{
+		"nld": {
+			CanonicalName: "nld",
+			BaseTypes:     []string{"organization"},
+		},
+		"diagnostics": {
+			CanonicalName: "diagnostics",
+			BaseTypes:     []string{"service"},
+		},
+	}
+
+	edges := []models.CandidateEdge{
+		{FromMention: "nld", RelationID: "ALIAS_OF", ToMention: "diagnostics"},
+	}
+
+	result := ApplyHardConstraints(edges, entities, map[string]string{})
+	if len(result) != 0 {
+		t.Error("ALIAS_OF between organization and service should be rejected")
+	}
+}
+
+func TestCheckAliasCompatibility_RejectsGenericTarget(t *testing.T) {
+	entities := map[string]*models.CanonicalEntity{
+		"nld": {
+			CanonicalName: "nld",
+			BaseTypes:     []string{"organization"},
+		},
+		"laboratory": {
+			CanonicalName: "laboratory",
+			BaseTypes:     []string{"organization"},
+		},
+	}
+
+	edges := []models.CandidateEdge{
+		{FromMention: "nld", RelationID: "ALIAS_OF", ToMention: "laboratory"},
+	}
+
+	result := ApplyHardConstraints(edges, entities, map[string]string{})
+	if len(result) != 0 {
+		t.Error("ALIAS_OF to generic target 'laboratory' should be rejected")
+	}
+}
+
+func TestCheckAliasCompatibility_AllowsCompatible(t *testing.T) {
+	entities := map[string]*models.CanonicalEntity{
+		"aal": {
+			CanonicalName: "aal",
+			BaseTypes:     []string{"organization"},
+		},
+		"al-amal laboratory": {
+			CanonicalName: "al-amal laboratory",
+			BaseTypes:     []string{"organization"},
+		},
+	}
+
+	edges := []models.CandidateEdge{
+		{FromMention: "aal", RelationID: "ALIAS_OF", ToMention: "al-amal laboratory"},
+	}
+
+	result := ApplyHardConstraints(edges, entities, map[string]string{})
+	if len(result) != 1 {
+		t.Error("ALIAS_OF between compatible organizations should be allowed")
+	}
+}
