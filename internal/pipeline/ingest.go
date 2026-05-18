@@ -84,7 +84,7 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 
 	// Phase 10: Post-solver validation
 	log.Println("[10/11] Post-solver validation...")
-	finalGraph = postSolverValidation(finalGraph)
+	finalGraph = postSolverValidation(finalGraph, aliasMap)
 	log.Printf("  After validation: %d entities, %d edges",
 		len(finalGraph.Entities), len(finalGraph.Edges))
 
@@ -169,18 +169,23 @@ func (p *Pipeline) extractSchemaConstrained(chunks []*models.Chunk) *models.Cand
 func buildAliasMap(entities []models.CandidateEntity) map[string]string {
 	aliasMap := map[string]string{}
 
-	// First pass: collect canonical candidates
+	// First pass: score all canonical candidates
 	canonicalScores := map[string]float64{}
+	evidenceCounts := map[string]int{}
 	for _, e := range entities {
 		name := e.CanonicalName
 		if name == "" {
 			name = e.Mention
 		}
-		// Score: longer names + higher type confidence = better canonical
-		score := float64(len(name))
-		if len(e.BaseTypes) > 0 {
-			score += e.BaseTypes[0].Score * 10
+		evidenceCounts[name] += len(e.Evidence)
+	}
+
+	for _, e := range entities {
+		name := e.CanonicalName
+		if name == "" {
+			name = e.Mention
 		}
+		score := scoreCanonicalCandidate(name, e, evidenceCounts[name])
 		if score > canonicalScores[name] {
 			canonicalScores[name] = score
 		}
@@ -208,6 +213,63 @@ func buildAliasMap(entities []models.CandidateEntity) map[string]string {
 	}
 
 	return aliasMap
+}
+
+// scoreCanonicalCandidate computes a quality score for a canonical name candidate.
+func scoreCanonicalCandidate(name string, e models.CandidateEntity, evidenceCount int) float64 {
+	score := 0.0
+
+	// Full-name boost: longer names are more specific and better canonicals
+	words := strings.Fields(name)
+	score += float64(len(words)) * 3.0
+
+	// Base type confidence boost
+	if len(e.BaseTypes) > 0 {
+		score += e.BaseTypes[0].Score * 10
+	}
+
+	// Evidence count boost: more mentions = more reliable
+	score += float64(evidenceCount) * 2.0
+
+	// Functional role boost: entities with roles are more semantically grounded
+	score += float64(len(e.FunctionalRoles)) * 3.0
+
+	// Status boost: known status is better than unknown
+	if e.Status != "" && e.Status != "unknown" {
+		score += 2.0
+	}
+
+	// Document-title penalty
+	docPatterns := []string{"knowledge base", "internal operations", "last reviewed",
+		"document owner", "version", "report", "manual", "policy document",
+		"user guide", "reference guide"}
+	lower := strings.ToLower(name)
+	for _, pattern := range docPatterns {
+		if strings.Contains(lower, pattern) {
+			score -= 20.0
+			break
+		}
+	}
+
+	// Generic phrase penalty: single common words are poor canonicals
+	if len(words) == 1 {
+		genericWords := map[string]bool{
+			"service": true, "branch": true, "unit": true, "office": true,
+			"center": true, "site": true, "department": true, "team": true,
+			"manager": true, "director": true, "system": true, "portal": true,
+		}
+		if genericWords[lower] {
+			score -= 15.0
+		}
+	}
+
+	// Alias penalty: if this entity was declared as an alias of something else, it's not the best canonical
+	if e.CanonicalName != "" && e.Mention != e.CanonicalName {
+		// The mention is an alias variant
+		score -= 5.0
+	}
+
+	return score
 }
 
 // selectCanonicalEntities merges duplicate entities and selects best types.
@@ -297,10 +359,14 @@ func selectCanonicalEntities(entities []models.CandidateEntity, aliasMap map[str
 // rewriteEdgesToCanonical replaces alias mentions with canonical names in all edges.
 func rewriteEdgesToCanonical(edges []models.CandidateEdge, aliasMap map[string]string) []models.CandidateEdge {
 	for i := range edges {
-		if canon, ok := aliasMap[edges[i].FromMention]; ok {
+		from := strings.ToLower(strings.TrimSpace(edges[i].FromMention))
+		to := strings.ToLower(strings.TrimSpace(edges[i].ToMention))
+		edges[i].FromMention = from
+		edges[i].ToMention = to
+		if canon, ok := aliasMap[from]; ok {
 			edges[i].FromMention = canon
 		}
-		if canon, ok := aliasMap[edges[i].ToMention]; ok {
+		if canon, ok := aliasMap[to]; ok {
 			edges[i].ToMention = canon
 		}
 	}
@@ -338,12 +404,10 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 		}
 		if len(ent.BaseTypes) > 0 {
 			entity.BaseType = ent.BaseTypes[0]
+			entity.Type = ent.BaseTypes[0]
 		}
 		if len(ent.DomainTypes) > 0 {
 			entity.DomainType = ent.DomainTypes[0]
-			entity.Type = ent.DomainTypes[0]
-		} else if len(ent.BaseTypes) > 0 {
-			entity.Type = ent.BaseTypes[0]
 		}
 		if err := p.store.CreateEntity(entity); err != nil {
 			log.Printf("Warning: failed to store entity '%s': %v", ent.CanonicalName, err)
@@ -370,14 +434,14 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 
 // postSolverValidation performs final cleanup on the solved graph.
 // Removes orphan entities, ensures type consistency, and validates edges.
-func postSolverValidation(fg *models.FinalGraph) *models.FinalGraph {
+func postSolverValidation(fg *models.FinalGraph, aliasMap map[string]string) *models.FinalGraph {
 	// Build entity lookup
 	entityByName := map[string]*models.KGEntity{}
 	for i := range fg.Entities {
 		entityByName[fg.Entities[i].CanonicalName] = &fg.Entities[i]
 	}
 
-	// Filter edges: both endpoints must exist as entities
+	// Filter edges: both endpoints must exist, no self-loops, no stale alias endpoints
 	var validEdges []models.KGEdge
 	usedEntities := map[string]bool{}
 	for _, edge := range fg.Edges {
@@ -389,6 +453,15 @@ func postSolverValidation(fg *models.FinalGraph) *models.FinalGraph {
 		}
 		if edge.From == edge.To {
 			continue
+		}
+		// Reject non-ALIAS_OF edges where either endpoint is still an alias
+		if edge.RelationID != "ALIAS_OF" {
+			if _, isAlias := aliasMap[edge.From]; isAlias {
+				continue
+			}
+			if _, isAlias := aliasMap[edge.To]; isAlias {
+				continue
+			}
 		}
 		validEdges = append(validEdges, edge)
 		usedEntities[edge.From] = true

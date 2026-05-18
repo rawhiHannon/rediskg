@@ -177,7 +177,7 @@ func (s *Schema) NormalizeEntityType(typeName string) string {
 // --- Heuristic helpers ---
 
 // findWordOrderVariant checks if the proposed type is a word-order rearrangement
-// of an existing type (e.g., "clinic_branch" vs "branch_clinic").
+// of an existing type (e.g., "branch_office" vs "office_branch").
 func (s *Schema) findWordOrderVariant(proposed string) string {
 	proposedParts := strings.Split(proposed, "_")
 	if len(proposedParts) < 2 {

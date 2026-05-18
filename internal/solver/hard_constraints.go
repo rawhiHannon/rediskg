@@ -237,7 +237,10 @@ func checkAliasEndpoint(edge models.CandidateEdge, aliasMap map[string]string) H
 func checkRelationSignature(edge models.CandidateEdge, entities map[string]*models.CanonicalEntity) HardConstraintResult {
 	relDef := schema.GetRelationDef(edge.RelationID)
 	if relDef == nil {
-		return HardConstraintResult{Pass: true} // unknown relation — let through for now
+		return HardConstraintResult{
+			Pass:   false,
+			Reason: "unknown relation '" + edge.RelationID + "' not in schema",
+		}
 	}
 
 	fromEnt := entities[edge.FromMention]

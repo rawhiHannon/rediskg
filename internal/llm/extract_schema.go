@@ -61,7 +61,7 @@ IMPORTANT RULES:
         {"type": "location", "score": 0.35}
       ],
       "domain_type_candidates": [
-        {"type": "clinic_branch", "score": 0.88}
+        {"type": "branch_office", "score": 0.88}
       ],
       "functional_roles": ["branch", "operated_unit"],
       "status": "active",

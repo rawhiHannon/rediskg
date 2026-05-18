@@ -26,9 +26,9 @@ const SchemaGovernanceTypePrompt = `You are a schema governance engine. You rece
 %s
 
 ## Rules
-- If a proposed type has the SAME words rearranged (e.g. "clinic_branch" vs "branch_clinic"), it's a synonym.
-- If a proposed type adds a redundant modifier (e.g. "healthcare_clinic_branch" when "clinic_branch" exists), it's a synonym of the shorter form.
-- If a proposed type is genuinely more specific (e.g. "pediatric_clinic" under "clinic"), it's a subtype.
+- If a proposed type has the SAME words rearranged (e.g. "branch_office" vs "office_branch"), it's a synonym.
+- If a proposed type adds a redundant modifier (e.g. "corporate_branch_office" when "branch_office" exists), it's a synonym of the shorter form.
+- If a proposed type is genuinely more specific (e.g. "legal_office" under "branch_office"), it's a subtype.
 - For NEW types, specify which base type(s) it belongs to.
 - For SYNONYM, specify the canonical (existing) type it maps to.
 - For SUBTYPE, specify the parent type it belongs under.

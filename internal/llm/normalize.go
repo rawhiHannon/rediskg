@@ -35,7 +35,7 @@ Your job is to produce a NORMALIZED, CANONICAL schema by:
 
 ## CRITICAL RULES:
 - Be AGGRESSIVE about merging. Similar types/relations MUST be unified.
-- clinic, clinic_branch, clinic_site, medical_center → ONE canonical type
+- branch, operating_unit, facility_site, regional_office → ONE canonical type
 - MANAGES, BRANCH_MANAGER, BRANCH_MANAGER_OF → ONE canonical relation
 - Role-like types (any job title or profession) MUST have base_type "role"
 - Relations with 4+ words are too verbose — map them to shorter canonical forms
@@ -59,10 +59,10 @@ Your job is to produce a NORMALIZED, CANONICAL schema by:
 {
   "type_normalization": [
     {
-      "canonical_domain_type": "clinic_branch",
+      "canonical_domain_type": "branch_office",
       "base_types": ["organization"],
-      "aliases": ["clinic", "clinic_site", "medical_center", "healthcare_facility"],
-      "notes": "A healthcare delivery branch or site."
+      "aliases": ["branch", "operating_unit", "facility_site", "regional_office"],
+      "notes": "An operational branch or site of a parent organization."
     }
   ],
   "relation_normalization": [

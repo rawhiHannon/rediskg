@@ -65,7 +65,7 @@ IMPORTANT: The text may be in any language. Extract entity names in their ORIGIN
 %s
 For each entity, provide:
 - base_type: one of the base types above
-- domain_type: a more specific subtype if applicable (e.g. "clinic", "pharmacy", "laboratory" under organization)
+- domain_type: a more specific subtype if applicable (e.g. "branch_office", "warehouse", "retail_store" under organization)
   If no specific domain type applies, leave domain_type empty.
 
 ## Evidence
@@ -151,7 +151,7 @@ const EntityResolutionPrompt = `You are an entity type resolver. Given an entity
 
 ## Rules
 - base_type: always one of the 10 base types above
-- domain_type: a more specific label UNDER the base type (e.g. "clinic" under organization, "laboratory" under organization, "medical_service" under service)
+- domain_type: a more specific label UNDER the base type (e.g. "branch_office" under organization, "warehouse" under organization, "consulting_service" under service)
 - If the entity is clearly just a base type with no useful specialization, leave domain_type empty
 - Use ALL the evidence to decide — a single mention may be misleading
 - If candidate_types disagree, use the evidence to pick the correct one

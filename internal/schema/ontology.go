@@ -9,7 +9,7 @@ type BaseType struct {
 
 // DefaultBaseTypes returns the predefined universal base type table.
 // These are broad and domain-independent. Domain-specific categories
-// (clinic_branch, pharmacy, etc.) become domain_types under these.
+// (branch_office, service_center, etc.) become domain_types under these.
 var PredefinedBaseTypes = []BaseType{
 	{ID: "person", Description: "Named individual (doctor, student, employee, artist, etc.)"},
 	{ID: "organization", Description: "Company, institution, agency, network, group, club, charity"},
@@ -292,7 +292,7 @@ func init() {
 		"EMPLOYED_AT":    "BASED_AT",
 		"MANAGED_BY":     "MANAGES",
 		"BRANCH_MANAGER_OF": "MANAGES",
-		"HAS_CLINICIAN":  "PROVIDES_SERVICE_FOR",
+		"HAS_PRACTITIONER": "PROVIDES_SERVICE_FOR",
 		"PROVIDES_FOR":   "PROVIDES_SERVICE_FOR",
 		"SERVES_AT":      "PROVIDES_SERVICE_FOR",
 		"STAFFED_BY":     "PROVIDES_SERVICE_FOR",

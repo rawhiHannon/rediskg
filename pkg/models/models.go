@@ -89,7 +89,7 @@ type Community struct {
 type EntityTypeInfo struct {
 	Type       string // resolved type (may be base or domain type)
 	BaseType   string // universal scaffold type (person, organization, location, etc.)
-	DomainType string // domain-specific subtype (clinic_branch, healthcare_network, etc.)
+	DomainType string // domain-specific subtype (branch_office, service_center, etc.)
 }
 
 // QueryResult holds the response to a natural language query.
