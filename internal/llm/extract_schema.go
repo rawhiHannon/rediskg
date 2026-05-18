@@ -15,6 +15,8 @@ import (
 func SchemaConstrainedExtractionPrompt() string {
 	baseTypes := schema.FormatBaseTypesForPrompt()
 	relations := schema.FormatRelationsForPrompt()
+	roles := schema.FormatFunctionalRolesForPrompt()
+	statuses := schema.FormatStatusesForPrompt()
 
 	return fmt.Sprintf(`You are a knowledge graph candidate extractor. Extract entities and relationships from the given text.
 
@@ -26,8 +28,16 @@ IMPORTANT RULES:
 5. For relations: use ONLY the relation IDs listed below. If no relation fits, skip that fact.
 6. When the same entity pair could have different relations, include ALL candidates with scores.
 7. Copy EXACT evidence text from the source (do not paraphrase).
+8. Assign functional_roles from the controlled list when evidence supports them.
+9. Assign a status from the controlled list based on evidence. Default to "active" if operating, "unknown" if unclear.
 
 ## PREDEFINED BASE TYPES (you MUST use these):
+%s
+
+## FUNCTIONAL ROLES (assign when evidence supports):
+%s
+
+## ENTITY STATUSES (assign one):
 %s
 
 ## PREDEFINED RELATIONS (you MUST use these IDs):
@@ -53,6 +63,8 @@ IMPORTANT RULES:
       "domain_type_candidates": [
         {"type": "clinic_branch", "score": 0.88}
       ],
+      "functional_roles": ["branch", "operated_unit"],
+      "status": "active",
       "aliases": [{"text": "short name", "lang": "en"}],
       "evidence": "exact sentence from text mentioning this entity"
     }
@@ -67,7 +79,7 @@ IMPORTANT RULES:
       "confidence": 0.85
     }
   ]
-}`, baseTypes, relations)
+}`, baseTypes, roles, statuses, relations)
 }
 
 // ExtractWithSchema extracts candidates from text using the schema-constrained prompt.
@@ -92,6 +104,8 @@ func ExtractWithSchema(client *Client, text string, chunkID string) ([]models.Ca
 				Type  string  `json:"type"`
 				Score float64 `json:"score"`
 			} `json:"domain_type_candidates"`
+			FunctionalRoles []string `json:"functional_roles"`
+			Status          string   `json:"status"`
 			Aliases []struct {
 				Text string `json:"text"`
 				Lang string `json:"lang"`
@@ -128,6 +142,20 @@ func ExtractWithSchema(client *Client, text string, chunkID string) ([]models.Ca
 		}
 		if ce.CanonicalName == "" {
 			ce.CanonicalName = ce.Mention
+		}
+
+		// Validate and set functional roles
+		for _, role := range e.FunctionalRoles {
+			role = strings.ToLower(strings.TrimSpace(role))
+			if role != "" && schema.IsValidFunctionalRole(role) {
+				ce.FunctionalRoles = append(ce.FunctionalRoles, role)
+			}
+		}
+
+		// Validate and set status
+		status := strings.ToLower(strings.TrimSpace(e.Status))
+		if status != "" && schema.IsValidStatus(status) {
+			ce.Status = status
 		}
 
 		for _, bt := range e.BaseTypeCandidates {

@@ -77,13 +77,19 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	log.Printf("  Hard constraints: %d -> %d edges", preCount, len(candidateGraph.Edges))
 
 	// Phase 9: Global graph selection
-	log.Println("[9/10] Running global graph selector...")
+	log.Println("[9/11] Running global graph selector...")
 	finalGraph := solver.SelectFinalGraph(candidateGraph.Edges, canonicalEntities)
 	log.Printf("  Final graph: %d entities, %d edges",
 		len(finalGraph.Entities), len(finalGraph.Edges))
 
-	// Phase 10: Materialize final KG
-	log.Println("[10/10] Materializing to FalkorDB...")
+	// Phase 10: Post-solver validation
+	log.Println("[10/11] Post-solver validation...")
+	finalGraph = postSolverValidation(finalGraph)
+	log.Printf("  After validation: %d entities, %d edges",
+		len(finalGraph.Entities), len(finalGraph.Edges))
+
+	// Phase 11: Materialize final KG
+	log.Println("[11/11] Materializing to FalkorDB...")
 	if err := p.materializeFinalGraph(finalGraph); err != nil {
 		return fmt.Errorf("materialization failed: %w", err)
 	}
@@ -257,6 +263,20 @@ func selectCanonicalEntities(entities []models.CandidateEntity, aliasMap map[str
 			}
 		}
 
+		// Aggregate functional roles
+		for _, role := range e.FunctionalRoles {
+			if !containsStr(existing.FunctionalRoles, role) {
+				existing.FunctionalRoles = append(existing.FunctionalRoles, role)
+			}
+		}
+
+		// Set status (prefer non-unknown, first wins)
+		if existing.Status == "" || existing.Status == "unknown" {
+			if e.Status != "" {
+				existing.Status = e.Status
+			}
+		}
+
 		// Collect aliases
 		existing.Aliases = append(existing.Aliases, e.Aliases...)
 
@@ -346,4 +366,57 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 	}
 
 	return nil
+}
+
+// postSolverValidation performs final cleanup on the solved graph.
+// Removes orphan entities, ensures type consistency, and validates edges.
+func postSolverValidation(fg *models.FinalGraph) *models.FinalGraph {
+	// Build entity lookup
+	entityByName := map[string]*models.KGEntity{}
+	for i := range fg.Entities {
+		entityByName[fg.Entities[i].CanonicalName] = &fg.Entities[i]
+	}
+
+	// Filter edges: both endpoints must exist as entities
+	var validEdges []models.KGEdge
+	usedEntities := map[string]bool{}
+	for _, edge := range fg.Edges {
+		if _, ok := entityByName[edge.From]; !ok {
+			continue
+		}
+		if _, ok := entityByName[edge.To]; !ok {
+			continue
+		}
+		if edge.From == edge.To {
+			continue
+		}
+		validEdges = append(validEdges, edge)
+		usedEntities[edge.From] = true
+		usedEntities[edge.To] = true
+	}
+
+	// Keep only entities that participate in at least one edge
+	var validEntities []models.KGEntity
+	for _, ent := range fg.Entities {
+		if usedEntities[ent.CanonicalName] {
+			if len(ent.BaseTypes) == 0 {
+				ent.BaseTypes = []string{"concept"}
+			}
+			validEntities = append(validEntities, ent)
+		}
+	}
+
+	return &models.FinalGraph{
+		Entities: validEntities,
+		Edges:    validEdges,
+	}
+}
+
+func containsStr(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

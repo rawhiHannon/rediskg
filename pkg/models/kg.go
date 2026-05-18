@@ -2,14 +2,16 @@ package models
 
 // KGEntity is the final materialized entity in the knowledge graph.
 type KGEntity struct {
-	ID            string            `json:"id"`
-	CanonicalName string            `json:"canonical_name"`
-	BaseTypes     []string          `json:"base_types"`
-	DomainTypes   []string          `json:"domain_types"`
-	Labels        map[string]string `json:"labels,omitempty"`       // lang -> label
-	Aliases       []LangText        `json:"aliases,omitempty"`
-	Properties    map[string]interface{} `json:"properties,omitempty"`
-	Embedding     []float32         `json:"embedding,omitempty"`
+	ID              string            `json:"id"`
+	CanonicalName   string            `json:"canonical_name"`
+	BaseTypes       []string          `json:"base_types"`
+	DomainTypes     []string          `json:"domain_types"`
+	FunctionalRoles []string          `json:"functional_roles,omitempty"`
+	Status          string            `json:"status,omitempty"` // active, planned, inactive, former, prospective, unknown
+	Labels          map[string]string `json:"labels,omitempty"` // lang -> label
+	Aliases         []LangText        `json:"aliases,omitempty"`
+	Properties      map[string]interface{} `json:"properties,omitempty"`
+	Embedding       []float32         `json:"embedding,omitempty"`
 }
 
 // KGEdge is the final materialized edge in the knowledge graph.
@@ -38,13 +40,15 @@ type EvidenceRef struct {
 
 // CandidateEntity is a proposed entity from extraction (before canonicalization).
 type CandidateEntity struct {
-	Mention       string              `json:"mention"`        // original text mention
-	CanonicalName string              `json:"canonical_candidate"` // proposed canonical name
-	BaseTypes     []ScoredType        `json:"base_type_candidates"`
-	DomainTypes   []ScoredType        `json:"domain_type_candidates"`
-	Aliases       []LangText          `json:"aliases,omitempty"`
-	Evidence      []EvidenceRef       `json:"evidence"`
-	ChunkID       string              `json:"chunk_id"`
+	Mention         string              `json:"mention"`             // original text mention
+	CanonicalName   string              `json:"canonical_candidate"` // proposed canonical name
+	BaseTypes       []ScoredType        `json:"base_type_candidates"`
+	DomainTypes     []ScoredType        `json:"domain_type_candidates"`
+	FunctionalRoles []string            `json:"functional_roles,omitempty"`
+	Status          string              `json:"status,omitempty"` // active, planned, inactive, former, prospective, unknown
+	Aliases         []LangText          `json:"aliases,omitempty"`
+	Evidence        []EvidenceRef       `json:"evidence"`
+	ChunkID         string              `json:"chunk_id"`
 }
 
 // ScoredType is a type candidate with a confidence score.
@@ -77,13 +81,30 @@ type CandidateGraph struct {
 
 // CanonicalEntity is an entity after alias resolution — ready for edge selection.
 type CanonicalEntity struct {
-	ID            string       `json:"id"`
-	CanonicalName string       `json:"canonical_name"`
-	BaseTypes     []string     `json:"base_types"`
-	DomainTypes   []string     `json:"domain_types"`
-	Labels        map[string]string `json:"labels,omitempty"`
-	Aliases       []LangText   `json:"aliases,omitempty"`
-	Evidence      []EvidenceRef `json:"evidence"`
+	ID              string            `json:"id"`
+	CanonicalName   string            `json:"canonical_name"`
+	BaseTypes       []string          `json:"base_types"`
+	DomainTypes     []string          `json:"domain_types"`
+	FunctionalRoles []string          `json:"functional_roles,omitempty"`
+	Status          string            `json:"status,omitempty"` // active, planned, inactive, former, prospective, unknown
+	Labels          map[string]string `json:"labels,omitempty"`
+	Aliases         []LangText        `json:"aliases,omitempty"`
+	Evidence        []EvidenceRef     `json:"evidence"`
+}
+
+// HasRole checks if an entity has a specific functional role.
+func (e *CanonicalEntity) HasRole(role string) bool {
+	for _, r := range e.FunctionalRoles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPlanned returns true if entity status is planned or has planned_unit role.
+func (e *CanonicalEntity) IsPlanned() bool {
+	return e.Status == "planned" || e.HasRole("planned_unit")
 }
 
 // FinalGraph is the output of the global graph selector — ready for materialization.

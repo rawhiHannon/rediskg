@@ -224,6 +224,8 @@ func buildFinal(edges []models.CandidateEdge, entities map[string]*models.Canoni
 			kgEnt.ID = ent.ID
 			kgEnt.BaseTypes = ent.BaseTypes
 			kgEnt.DomainTypes = ent.DomainTypes
+			kgEnt.FunctionalRoles = ent.FunctionalRoles
+			kgEnt.Status = ent.Status
 			kgEnt.Labels = ent.Labels
 			kgEnt.Aliases = ent.Aliases
 		}

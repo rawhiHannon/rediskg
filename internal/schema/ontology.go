@@ -37,16 +37,124 @@ var PredefinedBaseTypes = []BaseType{
 // BaseTypeSet is a lookup set for fast validation.
 var BaseTypeSet map[string]bool
 
+// PredefinedFunctionalRoles defines the controlled vocabulary for entity roles.
+// These are domain-agnostic roles that drive relation validation.
+var PredefinedFunctionalRoles = []string{
+	"parent_organization", // top-level org that owns branches/subsidiaries
+	"branch",              // operational unit of a parent org
+	"operator",            // entity that operates/runs other entities
+	"operated_unit",       // entity operated by an operator
+	"planned_unit",        // entity that is planned but not yet active
+	"staff_member",        // person who works at/for an entity
+	"deputy_manager",      // person in a deputy/acting manager role
+	"external_partner",    // independent partner entity (not a subsidiary)
+	"service_provider",    // entity that provides services
+	"headquarters",        // entity serving as HQ location
+	"regional_hub",        // entity serving as regional center
+}
+
+// FunctionalRoleSet is a lookup set for fast validation.
+var FunctionalRoleSet map[string]bool
+
+// PredefinedStatuses defines the controlled vocabulary for entity status.
+var PredefinedStatuses = []string{
+	"active",      // currently operating
+	"planned",     // planned but not yet active
+	"inactive",    // temporarily not operating
+	"former",      // no longer exists or operates
+	"prospective", // under consideration
+	"unknown",     // status not determinable from evidence
+}
+
+// StatusSet is a lookup set for fast validation.
+var StatusSet map[string]bool
+
+// RelationRule defines functional-role-based validation for a relation.
+type RelationRule struct {
+	SourceRoles []string // source entity must have one of these roles (empty = any)
+	TargetRoles []string // target entity must have one of these roles (empty = any)
+	ForbiddenTargetStatuses []string // target must NOT have these statuses
+	ForbiddenSourceStatuses []string // source must NOT have these statuses
+}
+
+// RelationRules maps relation IDs to their functional-role-based validation rules.
+var RelationRules map[string]RelationRule
+
 func init() {
 	BaseTypeSet = make(map[string]bool, len(PredefinedBaseTypes))
 	for _, bt := range PredefinedBaseTypes {
 		BaseTypeSet[bt.ID] = true
+	}
+
+	FunctionalRoleSet = make(map[string]bool, len(PredefinedFunctionalRoles))
+	for _, r := range PredefinedFunctionalRoles {
+		FunctionalRoleSet[r] = true
+	}
+
+	StatusSet = make(map[string]bool, len(PredefinedStatuses))
+	for _, s := range PredefinedStatuses {
+		StatusSet[s] = true
+	}
+
+	RelationRules = map[string]RelationRule{
+		"HAS_BRANCH": {
+			SourceRoles:             []string{"parent_organization", "operator"},
+			TargetRoles:             []string{"branch", "operated_unit"},
+			ForbiddenTargetStatuses: []string{"planned"},
+		},
+		"HAS_PLANNED_BRANCH": {
+			SourceRoles: []string{"parent_organization", "operator"},
+			TargetRoles: []string{"branch", "operated_unit", "planned_unit"},
+		},
+		"MANAGES": {
+			SourceRoles: []string{"staff_member"},
+		},
+		"HAS_DEPUTY_MANAGER": {
+			TargetRoles: []string{"deputy_manager", "staff_member"},
+		},
+		"PARTNERS_WITH": {
+			SourceRoles: []string{"external_partner", "parent_organization"},
+			TargetRoles: []string{"external_partner", "parent_organization"},
+		},
+		"BASED_AT": {
+			SourceRoles: []string{"staff_member"},
+		},
+		"VISITS": {
+			SourceRoles: []string{"staff_member", "service_provider"},
+		},
+		"PROVIDES_SERVICE_FOR": {
+			SourceRoles: []string{"staff_member", "service_provider"},
+		},
+		"PROVIDES_REMOTE_SERVICE_FOR": {
+			SourceRoles: []string{"staff_member", "service_provider"},
+		},
+		"HEADQUARTERED_AT": {
+			TargetRoles: []string{"headquarters"},
+		},
 	}
 }
 
 // IsValidBaseType checks if a type is a predefined base type.
 func IsValidBaseType(t string) bool {
 	return BaseTypeSet[t]
+}
+
+// IsValidFunctionalRole checks if a role is in the controlled vocabulary.
+func IsValidFunctionalRole(r string) bool {
+	return FunctionalRoleSet[r]
+}
+
+// IsValidStatus checks if a status is in the controlled vocabulary.
+func IsValidStatus(s string) bool {
+	return StatusSet[s]
+}
+
+// GetRelationRule returns the functional-role validation rule for a relation, or nil.
+func GetRelationRule(relationID string) *RelationRule {
+	if r, ok := RelationRules[relationID]; ok {
+		return &r
+	}
+	return nil
 }
 
 // RelationFamily groups related relation IDs under a semantic category.
@@ -245,6 +353,24 @@ func AllRelationIDs() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// FormatFunctionalRolesForPrompt returns a prompt-ready functional roles list.
+func FormatFunctionalRolesForPrompt() string {
+	var lines []string
+	for _, r := range PredefinedFunctionalRoles {
+		lines = append(lines, "- "+r)
+	}
+	return joinWithNewlines(lines)
+}
+
+// FormatStatusesForPrompt returns a prompt-ready statuses list.
+func FormatStatusesForPrompt() string {
+	var lines []string
+	for _, s := range PredefinedStatuses {
+		lines = append(lines, "- "+s)
+	}
+	return joinWithNewlines(lines)
 }
 
 // FormatBaseTypesForPrompt returns a prompt-ready base type list.
