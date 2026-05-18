@@ -953,23 +953,23 @@ func fixEntityStatuses(entities map[string]*models.CanonicalEntity) {
 }
 
 // cleanConflictingFunctionalRoles removes functional roles that conflict with
-// the entity's actual nature. Uses both domain-type-based hard rules and
-// name/evidence-based heuristics.
+// the entity's domain types, using ForbiddenSourceDomainTypes from schema rules.
+// Also adds roles based on entity name heuristics (e.g., "courier" in name).
 func cleanConflictingFunctionalRoles(entities map[string]*models.CanonicalEntity) {
-	// Domain types that are incompatible with courier/transport roles
-	nonCourierDomainTypes := []string{
-		"laboratory", "diagnostics_lab", "lab",
-		"pharmacy", "insurance_services", "imaging_provider",
-	}
-	courierRolesToClean := []string{
-		"medical_courier", "transport_provider", "logistics_provider",
-	}
+	// Build a map: role -> list of domain types that forbid it (from schema rules)
+	forbiddenDomainTypesForRole := buildForbiddenDomainTypeMap()
 
 	for _, ent := range entities {
-		// Hard rule: lab/pharmacy/insurance domain types cannot be couriers
-		if hasAnyDomainType(ent, nonCourierDomainTypes) {
-			ent.FunctionalRoles = removeRoles(ent.FunctionalRoles, courierRolesToClean...)
+		var cleaned []string
+		for _, role := range ent.FunctionalRoles {
+			if forbiddenDTs, ok := forbiddenDomainTypesForRole[role]; ok {
+				if hasAnyDomainType(ent.DomainTypes, forbiddenDTs) {
+					continue // drop this role — entity's domain type forbids it
+				}
+			}
+			cleaned = append(cleaned, role)
 		}
+		ent.FunctionalRoles = cleaned
 
 		// Positive rule: entities with courier/transport in name should get the role
 		name := strings.ToLower(ent.CanonicalName)
@@ -981,11 +981,42 @@ func cleanConflictingFunctionalRoles(entities map[string]*models.CanonicalEntity
 	}
 }
 
-// hasAnyDomainType checks if an entity has any of the specified domain types.
-func hasAnyDomainType(ent *models.CanonicalEntity, types []string) bool {
-	for _, dt := range ent.DomainTypes {
+// buildForbiddenDomainTypeMap reads all schema RelationRules and builds
+// a map: role -> []forbiddenDomainTypes.
+// If a relation says SourceRoles=[courier] and ForbiddenSourceDomainTypes=[lab],
+// then role "courier" is incompatible with domain type "lab".
+func buildForbiddenDomainTypeMap() map[string][]string {
+	result := map[string][]string{}
+	for _, rule := range schema.RelationRules {
+		if len(rule.SourceRoles) > 0 && len(rule.ForbiddenSourceDomainTypes) > 0 {
+			for _, role := range rule.SourceRoles {
+				result[role] = appendUnique(result[role], rule.ForbiddenSourceDomainTypes...)
+			}
+		}
+	}
+	return result
+}
+
+// appendUnique appends values that don't already exist in the slice.
+func appendUnique(existing []string, values ...string) []string {
+	set := make(map[string]bool, len(existing))
+	for _, v := range existing {
+		set[v] = true
+	}
+	for _, v := range values {
+		if !set[v] {
+			existing = append(existing, v)
+			set[v] = true
+		}
+	}
+	return existing
+}
+
+// hasAnyDomainType checks if any domain type in the list matches any target type.
+func hasAnyDomainType(domainTypes []string, targets []string) bool {
+	for _, dt := range domainTypes {
 		dtLower := strings.ToLower(dt)
-		for _, t := range types {
+		for _, t := range targets {
 			if dtLower == t {
 				return true
 			}

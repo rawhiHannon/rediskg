@@ -87,12 +87,25 @@ var EdgeStatusSet map[string]bool
 // StatusSet is a lookup set for fast validation.
 var StatusSet map[string]bool
 
-// RelationRule defines functional-role-based validation for a relation.
+// RelationRule defines schema-driven validation for a relation.
+// All constraints are declared here; the constraint engine is generic.
 type RelationRule struct {
-	SourceRoles []string // source entity must have one of these roles (empty = any)
-	TargetRoles []string // target entity must have one of these roles (empty = any)
-	ForbiddenTargetStatuses []string // target must NOT have these statuses
+	SourceRoles    []string // source entity must have one of these roles (empty = any)
+	TargetRoles    []string // target entity must have one of these roles (empty = any)
+
+	ForbiddenSourceRoles []string // source must NOT have any of these roles
+	ForbiddenTargetRoles []string // target must NOT have any of these roles
+
+	SourceDomainTypes    []string // source must have one of these domain types (empty = any)
+	TargetDomainTypes    []string // target must have one of these domain types (empty = any)
+
+	ForbiddenSourceDomainTypes []string // source must NOT have any of these domain types
+	ForbiddenTargetDomainTypes []string // target must NOT have any of these domain types
+
 	ForbiddenSourceStatuses []string // source must NOT have these statuses
+	ForbiddenTargetStatuses []string // target must NOT have these statuses
+
+	CanFlipDirection bool // if true, try swapping source/target when validation fails
 }
 
 // RelationRules maps relation IDs to their functional-role-based validation rules.
@@ -161,7 +174,17 @@ func init() {
 			SourceRoles: []string{"planned_unit", "branch", "operated_unit"},
 		},
 		"TRANSPORTS_SAMPLES_FOR": {
-			SourceRoles: []string{"medical_courier", "transport_provider"},
+			SourceRoles: []string{"medical_courier", "transport_provider", "logistics_provider"},
+			ForbiddenSourceDomainTypes: []string{
+				"laboratory", "diagnostics_lab", "lab",
+				"pharmacy", "insurance_services", "imaging_provider",
+			},
+		},
+		"PROCESSES_TESTS_FOR": {
+			SourceDomainTypes: []string{"laboratory", "diagnostics_lab", "lab"},
+			TargetRoles:       []string{"branch", "operated_unit"},
+			ForbiddenSourceRoles: []string{"branch", "operated_unit"},
+			CanFlipDirection: true,
 		},
 	}
 }

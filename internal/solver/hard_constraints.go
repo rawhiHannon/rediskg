@@ -92,18 +92,13 @@ func checkAllConstraints(
 		return r
 	}
 
-	// Constraint 11: Relation-specific direction validation (lab->branch, courier->target)
-	if r := checkRelationDirection(edge, entities); !r.Pass {
-		return r
-	}
-
-	// Constraint 12: Relation signature must match schema (base types)
+	// Constraint 11: Relation signature must match schema (base types)
 	if r := checkRelationSignature(edge, entities); !r.Pass {
 		return r
 	}
 
-	// Constraint 13: Relation must satisfy functional role rules
-	if r := checkRelationRoles(edge, entities); !r.Pass {
+	// Constraint 12: Schema-driven relation rule (roles, domain types, direction)
+	if r := checkRelationRule(edge, entities); !r.Pass {
 		return r
 	}
 
@@ -300,38 +295,99 @@ func checkRelationSignature(edge models.CandidateEdge, entities map[string]*mode
 	return HardConstraintResult{Pass: true}
 }
 
-// Constraint 7: Relation must satisfy functional role rules.
-// This is the domain-agnostic replacement for hardcoded domain checks.
-func checkRelationRoles(edge models.CandidateEdge, entities map[string]*models.CanonicalEntity) HardConstraintResult {
+// checkRelationRule is the generic schema-driven constraint checker.
+// It validates roles, domain types, and forbidden roles/domain types for both
+// source and target. If the rule has CanFlipDirection and the edge fails,
+// it tries the flipped direction before rejecting.
+func checkRelationRule(edge models.CandidateEdge, entities map[string]*models.CanonicalEntity) HardConstraintResult {
 	rule := schema.GetRelationRule(edge.RelationID)
 	if rule == nil {
-		return HardConstraintResult{Pass: true} // no role rule defined
+		return HardConstraintResult{Pass: true}
 	}
 
-	fromEnt := entities[edge.FromMention]
-	toEnt := entities[edge.ToMention]
+	from := entities[edge.FromMention]
+	to := entities[edge.ToMention]
 
-	// Check source roles
-	if len(rule.SourceRoles) > 0 && fromEnt != nil {
-		if !hasAnyRole(fromEnt, rule.SourceRoles) {
+	// Try original direction
+	if reason := validateEdgeAgainstRule(edge.FromMention, edge.ToMention, from, to, rule, edge.RelationID); reason == "" {
+		return HardConstraintResult{Pass: true}
+	}
+
+	// If flipping is allowed, try swapped direction
+	if rule.CanFlipDirection {
+		if reason := validateEdgeAgainstRule(edge.ToMention, edge.FromMention, to, from, rule, edge.RelationID); reason == "" {
+			fixed := edge
+			fixed.FromMention, fixed.ToMention = edge.ToMention, edge.FromMention
 			return HardConstraintResult{
-				Pass:   false,
-				Reason: edge.FromMention + " lacks required role for " + edge.RelationID + " source (needs one of: " + strings.Join(rule.SourceRoles, ", ") + ")",
+				Pass:    false,
+				Reason:  "flipped " + edge.RelationID + " direction to satisfy schema rule",
+				FixEdge: &fixed,
 			}
 		}
 	}
 
-	// Check target roles
-	if len(rule.TargetRoles) > 0 && toEnt != nil {
-		if !hasAnyRole(toEnt, rule.TargetRoles) {
-			return HardConstraintResult{
-				Pass:   false,
-				Reason: edge.ToMention + " lacks required role for " + edge.RelationID + " target (needs one of: " + strings.Join(rule.TargetRoles, ", ") + ")",
-			}
+	// Both directions fail — return the original failure reason
+	reason := validateEdgeAgainstRule(edge.FromMention, edge.ToMention, from, to, rule, edge.RelationID)
+	return HardConstraintResult{
+		Pass:   false,
+		Reason: reason,
+	}
+}
+
+// validateEdgeAgainstRule checks one direction of an edge against a RelationRule.
+// Returns empty string if valid, or a rejection reason.
+func validateEdgeAgainstRule(
+	fromName, toName string,
+	from, to *models.CanonicalEntity,
+	rule *schema.RelationRule,
+	relationID string,
+) string {
+	// Source checks
+	if from != nil {
+		if len(rule.SourceRoles) > 0 && !hasAnyRole(from, rule.SourceRoles) {
+			return fromName + " lacks required role for " + relationID + " source (needs one of: " + strings.Join(rule.SourceRoles, ", ") + ")"
+		}
+		if len(rule.ForbiddenSourceRoles) > 0 && hasAnyRole(from, rule.ForbiddenSourceRoles) {
+			return fromName + " has forbidden role for " + relationID + " source"
+		}
+		if len(rule.SourceDomainTypes) > 0 && !hasAnyDomainType(from.DomainTypes, rule.SourceDomainTypes) {
+			return fromName + " lacks required domain type for " + relationID + " source (needs one of: " + strings.Join(rule.SourceDomainTypes, ", ") + ")"
+		}
+		if len(rule.ForbiddenSourceDomainTypes) > 0 && hasAnyDomainType(from.DomainTypes, rule.ForbiddenSourceDomainTypes) {
+			return fromName + " has forbidden domain type for " + relationID + " source"
 		}
 	}
 
-	return HardConstraintResult{Pass: true}
+	// Target checks
+	if to != nil {
+		if len(rule.TargetRoles) > 0 && !hasAnyRole(to, rule.TargetRoles) {
+			return toName + " lacks required role for " + relationID + " target (needs one of: " + strings.Join(rule.TargetRoles, ", ") + ")"
+		}
+		if len(rule.ForbiddenTargetRoles) > 0 && hasAnyRole(to, rule.ForbiddenTargetRoles) {
+			return toName + " has forbidden role for " + relationID + " target"
+		}
+		if len(rule.TargetDomainTypes) > 0 && !hasAnyDomainType(to.DomainTypes, rule.TargetDomainTypes) {
+			return toName + " lacks required domain type for " + relationID + " target (needs one of: " + strings.Join(rule.TargetDomainTypes, ", ") + ")"
+		}
+		if len(rule.ForbiddenTargetDomainTypes) > 0 && hasAnyDomainType(to.DomainTypes, rule.ForbiddenTargetDomainTypes) {
+			return toName + " has forbidden domain type for " + relationID + " target"
+		}
+	}
+
+	return ""
+}
+
+// hasAnyDomainType checks if any domain type in the entity's list matches any target type.
+func hasAnyDomainType(domainTypes []string, targets []string) bool {
+	for _, dt := range domainTypes {
+		dtLower := strings.ToLower(dt)
+		for _, t := range targets {
+			if dtLower == t {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasAnyRole checks if entity has at least one of the specified roles.
@@ -416,115 +472,6 @@ func checkOffersEvidence(edge models.CandidateEdge) HardConstraintResult {
 	}
 
 	return HardConstraintResult{Pass: true}
-}
-
-// checkRelationDirection validates direction for relations with strict source/target semantics.
-func checkRelationDirection(
-	edge models.CandidateEdge,
-	entities map[string]*models.CanonicalEntity,
-) HardConstraintResult {
-	switch edge.RelationID {
-	case "PROCESSES_TESTS_FOR":
-		return checkProcessesTestsDirection(edge, entities)
-	case "TRANSPORTS_SAMPLES_FOR":
-		return checkTransportsSamplesDirection(edge, entities)
-	default:
-		return HardConstraintResult{Pass: true}
-	}
-}
-
-// checkProcessesTestsDirection ensures PROCESSES_TESTS_FOR goes lab -> branch/org.
-// If reversed (branch -> lab), flips the direction.
-func checkProcessesTestsDirection(
-	edge models.CandidateEdge,
-	entities map[string]*models.CanonicalEntity,
-) HardConstraintResult {
-	from := entities[edge.FromMention]
-	to := entities[edge.ToMention]
-	if from == nil || to == nil {
-		return HardConstraintResult{Pass: true}
-	}
-
-	labTypes := []string{"laboratory", "diagnostics_lab", "lab"}
-	fromIsLab := hasAnyDomainTypeStr(from.DomainTypes, labTypes)
-	toIsLab := hasAnyDomainTypeStr(to.DomainTypes, labTypes)
-
-	fromIsBranch := from.HasRole("branch") || from.HasRole("operated_unit")
-	toIsBranch := to.HasRole("branch") || to.HasRole("operated_unit")
-
-	// Correct direction: lab -> branch
-	if fromIsLab && !toIsLab {
-		return HardConstraintResult{Pass: true}
-	}
-
-	// Reversed: branch -> lab — flip it
-	if fromIsBranch && toIsLab {
-		fixed := edge
-		fixed.FromMention, fixed.ToMention = edge.ToMention, edge.FromMention
-		return HardConstraintResult{
-			Pass:    false,
-			Reason:  "flipped PROCESSES_TESTS_FOR to lab -> branch",
-			FixEdge: &fixed,
-		}
-	}
-
-	// Non-lab source processing tests for another non-lab — reject
-	if !fromIsLab && toIsBranch {
-		return HardConstraintResult{
-			Pass:   false,
-			Reason: "PROCESSES_TESTS_FOR source " + edge.FromMention + " is not a lab",
-		}
-	}
-
-	return HardConstraintResult{Pass: true}
-}
-
-// checkTransportsSamplesDirection ensures TRANSPORTS_SAMPLES_FOR source is a courier,
-// and explicitly rejects labs as source.
-func checkTransportsSamplesDirection(
-	edge models.CandidateEdge,
-	entities map[string]*models.CanonicalEntity,
-) HardConstraintResult {
-	from := entities[edge.FromMention]
-	if from == nil {
-		return HardConstraintResult{Pass: true}
-	}
-
-	labTypes := []string{"laboratory", "diagnostics_lab", "lab"}
-	fromIsLab := hasAnyDomainTypeStr(from.DomainTypes, labTypes)
-
-	if fromIsLab {
-		return HardConstraintResult{
-			Pass:   false,
-			Reason: "TRANSPORTS_SAMPLES_FOR source cannot be lab/diagnostics provider: " + edge.FromMention,
-		}
-	}
-
-	fromIsCourier := from.HasRole("medical_courier") ||
-		from.HasRole("transport_provider") ||
-		from.HasRole("logistics_provider")
-
-	if !fromIsCourier {
-		return HardConstraintResult{
-			Pass:   false,
-			Reason: "TRANSPORTS_SAMPLES_FOR source must be courier/transport provider: " + edge.FromMention,
-		}
-	}
-
-	return HardConstraintResult{Pass: true}
-}
-
-// hasAnyDomainTypeStr checks if any domain type in the list matches any of the target types.
-func hasAnyDomainTypeStr(domainTypes []string, targets []string) bool {
-	for _, dt := range domainTypes {
-		dtLower := strings.ToLower(dt)
-		for _, t := range targets {
-			if dtLower == t {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // checkContractEvidence rejects CONTRACTED_WITH edges whose evidence does not

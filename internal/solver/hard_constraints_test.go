@@ -330,6 +330,33 @@ func TestCheckRelationDirection_AllowsLabToBranchProcessesTests(t *testing.T) {
 	}
 }
 
+func TestCheckRelationDirection_RejectsLabToParentOrgProcessesTests(t *testing.T) {
+	entities := map[string]*models.CanonicalEntity{
+		"al-amal laboratory": {
+			CanonicalName:   "al-amal laboratory",
+			BaseTypes:       []string{"organization"},
+			DomainTypes:     []string{"laboratory"},
+			FunctionalRoles: []string{"external_partner", "service_provider"},
+		},
+		"cedargate health network": {
+			CanonicalName:   "cedargate health network",
+			BaseTypes:       []string{"organization"},
+			DomainTypes:     []string{},
+			FunctionalRoles: []string{"parent_organization"},
+		},
+	}
+
+	edges := []models.CandidateEdge{
+		{FromMention: "al-amal laboratory", RelationID: "PROCESSES_TESTS_FOR", ToMention: "cedargate health network"},
+	}
+
+	result := ApplyHardConstraints(edges, entities, map[string]string{})
+
+	if len(result) != 0 {
+		t.Error("PROCESSES_TESTS_FOR from lab to parent org (non-branch) should be rejected")
+	}
+}
+
 func TestCheckRelationDirection_RejectsLabTransportsSamples(t *testing.T) {
 	entities := map[string]*models.CanonicalEntity{
 		"northlab diagnostics": {
