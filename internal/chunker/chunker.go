@@ -14,23 +14,100 @@ import (
 var separators = []string{"\n\n", "\n", ". ", "? ", "! ", "؟ ", "。", "، ", "; ", ", ", "、", " "}
 
 // ChunkDocuments splits documents into overlapping chunks.
+// Each chunk carries section context from the nearest preceding heading.
 func ChunkDocuments(docs []*models.Document, chunkSize, overlap int) []*models.Chunk {
 	var chunks []*models.Chunk
 
 	for _, doc := range docs {
 		docChunks := chunkText(doc.Content, chunkSize, overlap)
+		sections := extractSectionHeadings(doc.Content)
+
 		for i, text := range docChunks {
+			meta := copyMetadata(doc.Metadata)
+			// Find the section heading that applies to this chunk
+			section := findSectionForChunk(text, sections, doc.Content)
+			if section != "" {
+				meta["section"] = section
+				// Prepend section context to chunk text so the LLM knows which section it's extracting from
+				text = "Context: Section = " + section + "\n\n" + text
+			}
+
 			chunks = append(chunks, &models.Chunk{
 				ID:       uuid.New().String()[:32],
 				Text:     text,
 				Source:   doc.Source,
 				Index:    i,
-				Metadata: doc.Metadata,
+				Metadata: meta,
 			})
 		}
 	}
 
 	return chunks
+}
+
+// extractSectionHeadings finds markdown-style headings in text.
+// Returns heading text and byte offset pairs.
+type sectionHeading struct {
+	Text   string
+	Offset int
+}
+
+func extractSectionHeadings(text string) []sectionHeading {
+	var headings []sectionHeading
+	lines := strings.Split(text, "\n")
+	offset := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			// Strip leading '#' characters
+			heading := strings.TrimLeft(trimmed, "# ")
+			if heading != "" {
+				headings = append(headings, sectionHeading{Text: heading, Offset: offset})
+			}
+		}
+		offset += len(line) + 1 // +1 for the newline
+	}
+	return headings
+}
+
+// findSectionForChunk returns the most recent heading that precedes or is in the chunk.
+func findSectionForChunk(chunkText string, headings []sectionHeading, fullText string) string {
+	if len(headings) == 0 {
+		return ""
+	}
+
+	// Find where the chunk starts in the full text
+	chunkStart := strings.Index(fullText, chunkText[:min(len(chunkText), 80)])
+	if chunkStart < 0 {
+		return headings[0].Text // fallback to first heading
+	}
+
+	// Find the last heading before or at chunk start
+	best := ""
+	for _, h := range headings {
+		if h.Offset <= chunkStart {
+			best = h.Text
+		}
+	}
+	return best
+}
+
+func copyMetadata(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // chunkText recursively splits text into chunks of the target size with overlap.

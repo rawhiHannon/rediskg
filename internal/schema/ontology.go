@@ -245,9 +245,9 @@ var PredefinedRelations = []RelationFamily{
 		Category: "EVENT",
 		Relations: []RelationDef{
 			{ID: "OCCURRED_ON", Description: "Event occurred on date", SourceTypes: []string{"event"}, TargetTypes: []string{"date_time"}},
-			{ID: "INVOLVES", Description: "Event involves entity"},
-			{ID: "CAUSED_BY", Description: "Event caused by another event/entity"},
-			{ID: "AFFECTS", Description: "Event/action affects entity"},
+			{ID: "INVOLVES", Description: "Event involves entity", SourceTypes: []string{"event"}},
+			{ID: "CAUSED_BY", Description: "Event caused by another event/entity", SourceTypes: []string{"event"}},
+			{ID: "AFFECTS", Description: "Event/incident affects entity (not for org->org)", SourceTypes: []string{"event"}},
 			{ID: "ESCALATED_TO", Description: "Incident/issue escalated to entity"},
 			{ID: "NOTIFIED", Description: "Entity was notified about event"},
 			{ID: "REPORTED_BY", Description: "Event reported by entity"},
@@ -346,10 +346,16 @@ func init() {
 		"HAS_SYSTEM":     "USES",
 		"RUNS_ON":        "USES",
 
-		// General
-		"RELATED_TO":     "", // reject: too vague
+		// General — reject vague relations
+		"RELATED_TO":      "", // reject: too vague
 		"ASSOCIATED_WITH": "", // reject: too vague
-		"HANDLES":        "", // reject: too vague without context
+		"HANDLES":         "", // reject: use specific variant (HANDLES_BILLING_FOR, etc.)
+		"WORKS_WITH":      "", // reject: too vague (use PARTNERS_WITH or BASED_AT)
+		"SUPPORTS":        "", // reject: too vague
+		"HELPS":           "", // reject: too vague
+		"INTERACTS_WITH":  "", // reject: too vague
+		"LINKED_TO":       "", // reject: too vague
+		"DEPENDS_ON":      "REQUIRES",
 	}
 }
 

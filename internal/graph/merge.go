@@ -103,8 +103,11 @@ func resolveServiceConflicts(edges []models.EdgeRecord) []models.EdgeRecord {
 
 	removed := 0
 	result := make([]models.EdgeRecord, 0, len(edges))
+	positiveServiceRels := map[string]bool{
+		"OFFERS": true, "OFFERS_SERVICE": true, "PROVIDES": true, "HAS_SERVICE": true,
+	}
 	for _, e := range edges {
-		if e.Edge == "OFFERS_SERVICE" {
+		if positiveServiceRels[e.Edge] {
 			key := e.Node1 + "|||" + e.Node2
 			if denied[key] {
 				removed++
@@ -115,7 +118,7 @@ func resolveServiceConflicts(edges []models.EdgeRecord) []models.EdgeRecord {
 	}
 
 	if removed > 0 {
-		log.Printf("Conflict resolution: removed %d OFFERS_SERVICE edges that conflict with DOES_NOT_OFFER", removed)
+		log.Printf("Conflict resolution: removed %d positive service edges that conflict with DOES_NOT_OFFER", removed)
 	}
 
 	return result

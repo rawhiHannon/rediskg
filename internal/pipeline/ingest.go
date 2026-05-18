@@ -45,6 +45,14 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 		return fmt.Errorf("no entities extracted from documents")
 	}
 
+	// Phase 2b: Filter raw value entities (dates, times, quantities)
+	preFilter := len(candidateGraph.Entities)
+	candidateGraph.Entities = filterRawValueEntities(candidateGraph.Entities)
+	if preFilter != len(candidateGraph.Entities) {
+		log.Printf("  Filtered %d raw value entities (%d remaining)",
+			preFilter-len(candidateGraph.Entities), len(candidateGraph.Entities))
+	}
+
 	// Phase 3: Group aliases and deduplicate entity mentions
 	log.Println("[3/10] Grouping aliases...")
 	aliasMap := buildAliasMap(candidateGraph.Entities)
@@ -89,13 +97,19 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 		len(finalGraph.Entities), len(finalGraph.Edges))
 
 	// Phase 10: Post-solver validation
-	log.Println("[10/11] Post-solver validation...")
+	log.Println("[10/12] Post-solver validation...")
 	finalGraph = postSolverValidation(finalGraph, aliasMap)
 	log.Printf("  After validation: %d entities, %d edges",
 		len(finalGraph.Entities), len(finalGraph.Edges))
 
-	// Phase 11: Materialize final KG
-	log.Println("[11/11] Materializing to FalkorDB...")
+	// Phase 11: Negative-fact conflict resolution
+	log.Println("[11/12] Resolving negative-fact conflicts...")
+	preConflict := len(finalGraph.Edges)
+	finalGraph.Edges = resolveNegativeConflicts(finalGraph.Edges)
+	log.Printf("  Conflict resolution: %d -> %d edges", preConflict, len(finalGraph.Edges))
+
+	// Phase 12: Materialize final KG
+	log.Println("[12/12] Materializing to FalkorDB...")
 	if err := p.materializeFinalGraph(finalGraph); err != nil {
 		return fmt.Errorf("materialization failed: %w", err)
 	}
@@ -432,12 +446,17 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 
 	// Store edges
 	for _, edge := range fg.Edges {
+		evidence := ""
+		if len(edge.Evidence) > 0 {
+			evidence = edge.Evidence[0].Text
+		}
 		edgeRecord := models.EdgeRecord{
 			Node1:    edge.From,
 			Node2:    edge.To,
 			Edge:     edge.RelationID,
 			Weight:   edge.Weight,
 			ChunkIDs: edge.ChunkIDs,
+			Evidence: evidence,
 		}
 		if err := p.store.CreateEdge(edgeRecord); err != nil {
 			log.Printf("Warning: failed to store edge %s -[%s]-> %s: %v",
@@ -514,6 +533,70 @@ func rewriteStatusAwareEdges(edges []models.CandidateEdge, entities map[string]*
 		}
 	}
 	return edges
+}
+
+// resolveNegativeConflicts removes positive edges when a matching negative edge exists.
+// E.g., OFFERS is removed if DOES_NOT_OFFER exists for the same (from, to) pair.
+func resolveNegativeConflicts(edges []models.KGEdge) []models.KGEdge {
+	// Map of negative relation -> positive relation it overrides
+	negativeOverrides := map[string]string{
+		"DOES_NOT_OFFER":  "OFFERS",
+		"DOES_NOT_WORK_AT": "BASED_AT",
+		"NO_CONTRACT_WITH": "CONTRACTED_WITH",
+	}
+
+	// Build set of (from, to) pairs with negative facts
+	type pairKey struct{ from, to string }
+	denied := map[string]map[pairKey]bool{} // positive_rel -> set of denied pairs
+
+	for _, e := range edges {
+		if positiveRel, isNeg := negativeOverrides[e.RelationID]; isNeg {
+			if denied[positiveRel] == nil {
+				denied[positiveRel] = map[pairKey]bool{}
+			}
+			denied[positiveRel][pairKey{e.From, e.To}] = true
+		}
+	}
+
+	if len(denied) == 0 {
+		return edges
+	}
+
+	var result []models.KGEdge
+	for _, e := range edges {
+		if pairs, ok := denied[e.RelationID]; ok {
+			if pairs[pairKey{e.From, e.To}] {
+				continue // overridden by negative fact
+			}
+		}
+		result = append(result, e)
+	}
+	return result
+}
+
+// filterRawValueEntities removes entities that are raw values (dates, times, etc.)
+// and should be stored as edge properties instead.
+func filterRawValueEntities(entities []models.CandidateEntity) []models.CandidateEntity {
+	var result []models.CandidateEntity
+	for _, e := range entities {
+		if isRawValueEntity(e) {
+			continue
+		}
+		result = append(result, e)
+	}
+	return result
+}
+
+// isRawValueEntity checks if an entity is a raw date/time/quantity value.
+func isRawValueEntity(e models.CandidateEntity) bool {
+	// Check if primary base type is date_time or quantity
+	if len(e.BaseTypes) > 0 {
+		primary := e.BaseTypes[0].Type
+		if primary == "date_time" || primary == "quantity" || primary == "money" || primary == "identifier" {
+			return true
+		}
+	}
+	return false
 }
 
 func containsStr(ss []string, s string) bool {

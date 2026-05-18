@@ -63,11 +63,12 @@ func (s *FalkorStore) ROQuery(cypher string) (interface{}, error) {
 
 // CreateEntity creates or merges an entity node in the graph with properties.
 // Always updates type and properties (not just on create) so validated data overwrites earlier values.
+// Adds the base type as an additional label (e.g., :Concept:Organization).
 func (s *FalkorStore) CreateEntity(entity models.Entity) error {
 	name := escapeCypher(strings.ToLower(strings.TrimSpace(entity.Name)))
 	entityType := escapeCypher(strings.ToLower(strings.TrimSpace(entity.Type)))
 	if entityType == "" {
-		entityType = "Concept"
+		entityType = "concept"
 	}
 
 	// Build SET parts for properties
@@ -87,8 +88,44 @@ func (s *FalkorStore) CreateEntity(entity models.Entity) error {
 		name, setClause,
 	)
 
-	_, err := s.Query(cypher)
-	return err
+	if _, err := s.Query(cypher); err != nil {
+		return err
+	}
+
+	// Add base type as additional label for typed queries (e.g., MATCH (p:Person))
+	typeLabel := toTypeLabel(entityType)
+	if typeLabel != "" && typeLabel != "Concept" {
+		labelCypher := fmt.Sprintf(
+			`MATCH (n:Concept {name: '%s'}) SET n:%s`,
+			name, typeLabel,
+		)
+		if _, err := s.Query(labelCypher); err != nil {
+			// Non-fatal: label addition is an optimization
+			_ = err
+		}
+	}
+
+	return nil
+}
+
+// toTypeLabel converts a base type string to a valid Cypher label (PascalCase).
+func toTypeLabel(baseType string) string {
+	if baseType == "" {
+		return ""
+	}
+	// Capitalize first letter of each word
+	parts := strings.Split(baseType, "_")
+	for i, p := range parts {
+		if len(p) > 0 {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	label := strings.Join(parts, "")
+	// Validate: must start with letter
+	if len(label) == 0 || (label[0] < 'A' || label[0] > 'Z') {
+		return ""
+	}
+	return label
 }
 
 // CreateEdge creates or merges a relationship in the graph.
@@ -119,18 +156,20 @@ func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 		typeSetClause = fmt.Sprintf(" SET %s", strings.Join(typeSets, ", "))
 	}
 
+	evidenceStr := escapeCypher(record.Evidence)
+
 	cypher := fmt.Sprintf(
 		`MERGE (a:Concept {name: '%s'})
 		 ON CREATE SET a.name = '%s'
 		 MERGE (b:Concept {name: '%s'})
 		 ON CREATE SET b.name = '%s'%s
 		 MERGE (a)-[r:%s]->(b)
-		 ON CREATE SET r.description = '%s', r.weight = %f, r.inferred = %t, r.chunk_ids = '%s'
+		 ON CREATE SET r.description = '%s', r.weight = %f, r.inferred = %t, r.chunk_ids = '%s', r.evidence = '%s'
 		 ON MATCH SET r.weight = r.weight + %f, r.chunk_ids = r.chunk_ids + ',%s'`,
 		n1, n1,
 		n2, n2, typeSetClause,
 		edgeType, edgeDesc,
-		record.Weight, record.Inferred, strings.Join(record.ChunkIDs, ","),
+		record.Weight, record.Inferred, strings.Join(record.ChunkIDs, ","), evidenceStr,
 		record.Weight, strings.Join(record.ChunkIDs, ","),
 	)
 

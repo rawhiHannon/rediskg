@@ -75,6 +75,9 @@ type EdgeRecord struct {
 	ChunkIDs  []string // source chunk IDs
 	Weight    float64  // combined weight
 	Inferred  bool     // true if from proximity/inference, false if LLM-extracted
+	Evidence  string   // source text supporting this edge
+	Condition string   // conditional context (e.g., "during downtime")
+	Status    string   // edge status: active, backup, planned, conditional
 }
 
 // Community represents a detected community/cluster of nodes.

@@ -209,6 +209,67 @@ func TestPostSolverValidation_RemovesOrphanEntities(t *testing.T) {
 	}
 }
 
+// --- Negative conflict resolution tests ---
+
+func TestResolveNegativeConflicts_NegativeOverridesPositive(t *testing.T) {
+	edges := []models.KGEdge{
+		{From: "branch_a", RelationID: "OFFERS", To: "dermatology"},
+		{From: "branch_a", RelationID: "DOES_NOT_OFFER", To: "dermatology"},
+		{From: "branch_b", RelationID: "OFFERS", To: "pediatrics"},
+	}
+
+	result := resolveNegativeConflicts(edges)
+
+	for _, e := range result {
+		if e.From == "branch_a" && e.RelationID == "OFFERS" && e.To == "dermatology" {
+			t.Error("OFFERS should be removed when DOES_NOT_OFFER exists for same pair")
+		}
+	}
+	// DOES_NOT_OFFER should remain
+	foundNeg := false
+	for _, e := range result {
+		if e.RelationID == "DOES_NOT_OFFER" {
+			foundNeg = true
+		}
+	}
+	if !foundNeg {
+		t.Error("DOES_NOT_OFFER edge should be preserved")
+	}
+	// branch_b OFFERS pediatrics should remain
+	foundB := false
+	for _, e := range result {
+		if e.From == "branch_b" && e.RelationID == "OFFERS" {
+			foundB = true
+		}
+	}
+	if !foundB {
+		t.Error("unrelated OFFERS edge should be preserved")
+	}
+}
+
+// --- Raw value entity filtering tests ---
+
+func TestFilterRawValueEntities(t *testing.T) {
+	entities := []models.CandidateEntity{
+		{Mention: "cedargate", BaseTypes: []models.ScoredType{{Type: "organization", Score: 0.9}}},
+		{Mention: "2025-02-13", BaseTypes: []models.ScoredType{{Type: "date_time", Score: 0.95}}},
+		{Mention: "10:00", BaseTypes: []models.ScoredType{{Type: "date_time", Score: 0.8}}},
+		{Mention: "dr. smith", BaseTypes: []models.ScoredType{{Type: "person", Score: 0.9}}},
+		{Mention: "50000", BaseTypes: []models.ScoredType{{Type: "money", Score: 0.7}}},
+	}
+
+	result := filterRawValueEntities(entities)
+
+	if len(result) != 2 {
+		t.Errorf("expected 2 entities after filtering, got %d", len(result))
+	}
+	for _, e := range result {
+		if e.BaseTypes[0].Type == "date_time" || e.BaseTypes[0].Type == "money" {
+			t.Errorf("raw value entity %q should have been filtered", e.Mention)
+		}
+	}
+}
+
 // --- Normalize relations test ---
 
 func TestNormalizeRelations_RemovesSelfLoops(t *testing.T) {
