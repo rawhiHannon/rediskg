@@ -30,7 +30,7 @@ IMPORTANT RULES:
 7. Copy EXACT evidence text from the source (do not paraphrase).
 8. Assign functional_roles from the controlled list when evidence supports them.
 9. Assign a status from the controlled list based on evidence. Default to "active" if operating, "unknown" if unclear.
-10. NEGATIVE FACTS: When text says "X does NOT work at Y", "X no longer at Y", "does not offer Z", extract the negative relation (DOES_NOT_WORK_AT, DOES_NOT_OFFER, NO_CONTRACT_WITH). Do NOT convert negations into positive relations.
+10. NEGATIVE FACTS: When text says "X does NOT work at Y", "X no longer at Y", "does not offer Z", "does not handle billing/claims/reimbursement for X", extract the negative relation. Use: DOES_NOT_WORK_AT, DOES_NOT_OFFER, NO_CONTRACT_WITH, DOES_NOT_HANDLE_BILLING_FOR, DOES_NOT_HANDLE_CLAIMS_FOR, DOES_NOT_HANDLE_REIMBURSEMENT_FOR, DOES_NOT_PROCESS_TESTS_FOR. Do NOT convert negations into positive relations.
 11. BRANCH TYPING: Branch offices, subsidiaries, and operational sites of an organization are base_type "organization", NOT "location". Only use "location" for pure geographic places (cities, countries, neighborhoods).
 12. PLANNED vs ACTIVE: If an entity is described as planned, upcoming, or future, set status to "planned" and use PLANNED_SERVICE (not OFFERS) for its services. Add functional_role "planned_unit".
 

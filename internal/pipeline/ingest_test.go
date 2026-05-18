@@ -396,6 +396,26 @@ func TestAnnotateConditionalEdges_BackupDetection(t *testing.T) {
 	}
 }
 
+func TestAnnotateConditionalEdges_EventNotBackup(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "cg-2025-004",
+			RelationID:   "INVOLVES",
+			ToMention:    "equipment downtime",
+			EvidenceText: "Incident CG-2025-004 involves equipment downtime at Al-Amal Laboratory.",
+		},
+	}
+
+	result := annotateConditionalEdges(edges)
+
+	if result[0].Status == "backup" {
+		t.Error("event relation INVOLVES should not get backup status, expected conditional")
+	}
+	if result[0].Status != "conditional" {
+		t.Errorf("expected status 'conditional' for non-eligible relation with downtime, got %q", result[0].Status)
+	}
+}
+
 func TestAnnotateConditionalEdges_ConditionalDetection(t *testing.T) {
 	edges := []models.CandidateEdge{
 		{

@@ -678,9 +678,11 @@ func containsAny(s string, subs []string) bool {
 func fixNegatedRelations(edges []models.CandidateEdge) []models.CandidateEdge {
 	negationPhrases := []string{
 		"does not handle", "doesn't handle", "do not handle",
-		"not handle", "does not manage", "not responsible for",
-		"does not cover", "doesn't cover", "not covered",
+		"not responsible for",
 		"does not process", "doesn't process",
+		"does not offer", "doesn't offer",
+		"not available",
+		"no contract with",
 	}
 
 	for i := range edges {
@@ -726,10 +728,14 @@ func annotateConditionalEdges(edges []models.CandidateEdge) []models.CandidateEd
 			continue
 		}
 
-		// Determine status
+		// Determine status — only mark backup for eligible partner/service relations
 		if containsAny(ev, backupTriggers) {
-			if e.Status == "" || e.Status == "active" {
-				e.Status = "backup"
+			if isBackupEligibleRelation(e.RelationID) {
+				if e.Status == "" || e.Status == "active" {
+					e.Status = "backup"
+				}
+			} else if e.Status == "" || e.Status == "active" {
+				e.Status = "conditional"
 			}
 		} else if e.Status == "" || e.Status == "active" {
 			e.Status = "conditional"
@@ -741,6 +747,23 @@ func annotateConditionalEdges(edges []models.CandidateEdge) []models.CandidateEd
 		}
 	}
 	return edges
+}
+
+// isBackupEligibleRelation returns true for partner/service relations where "backup" status makes sense.
+// Event relations (INVOLVES, CAUSED_BY, OCCURRED_ON) should not be marked as backup.
+func isBackupEligibleRelation(rel string) bool {
+	switch rel {
+	case "PROCESSES_TESTS_FOR",
+		"TRANSPORTS_SAMPLES_FOR",
+		"FULFILLS_PRESCRIPTIONS_FOR",
+		"HANDLES_BILLING_FOR",
+		"HANDLES_REIMBURSEMENT_FOR",
+		"PROVIDES_SERVICE_FOR",
+		"PROVIDES_REMOTE_SERVICE_FOR":
+		return true
+	default:
+		return false
+	}
 }
 
 // extractConditionPhrase extracts the conditional clause from evidence text.
