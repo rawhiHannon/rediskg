@@ -953,35 +953,60 @@ func fixEntityStatuses(entities map[string]*models.CanonicalEntity) {
 }
 
 // cleanConflictingFunctionalRoles removes functional roles that conflict with
-// the entity's actual nature. For example, an organization that is not actually
-// a courier service should not have "medical_courier" or "transport_provider".
+// the entity's actual nature. Uses both domain-type-based hard rules and
+// name/evidence-based heuristics.
 func cleanConflictingFunctionalRoles(entities map[string]*models.CanonicalEntity) {
-	// Roles that require specific evidence — remove if entity lacks supporting signals
-	courierRoles := map[string]bool{
-		"medical_courier":    true,
-		"transport_provider": true,
+	// Domain types that are incompatible with courier/transport roles
+	nonCourierDomainTypes := []string{
+		"laboratory", "diagnostics_lab", "lab",
+		"pharmacy", "insurance_services", "imaging_provider",
 	}
-	courierKeywords := []string{
-		"courier", "transport", "delivery", "logistics", "dispatch", "shipping",
+	courierRolesToClean := []string{
+		"medical_courier", "transport_provider", "logistics_provider",
 	}
 
 	for _, ent := range entities {
-		var cleaned []string
-		for _, role := range ent.FunctionalRoles {
-			if courierRoles[role] {
-				// Only keep if the entity name or evidence supports it
-				nameLower := strings.ToLower(ent.CanonicalName)
-				evLower := strings.ToLower(joinEvidence(ent.Evidence))
-				if containsAny(nameLower, courierKeywords) || containsAny(evLower, courierKeywords) {
-					cleaned = append(cleaned, role)
-				}
-				// else: silently drop the conflicting role
-			} else {
-				cleaned = append(cleaned, role)
+		// Hard rule: lab/pharmacy/insurance domain types cannot be couriers
+		if hasAnyDomainType(ent, nonCourierDomainTypes) {
+			ent.FunctionalRoles = removeRoles(ent.FunctionalRoles, courierRolesToClean...)
+		}
+
+		// Positive rule: entities with courier/transport in name should get the role
+		name := strings.ToLower(ent.CanonicalName)
+		if strings.Contains(name, "courier") || strings.Contains(name, "transport") {
+			if !containsStr(ent.FunctionalRoles, "medical_courier") {
+				ent.FunctionalRoles = append(ent.FunctionalRoles, "medical_courier")
 			}
 		}
-		ent.FunctionalRoles = cleaned
 	}
+}
+
+// hasAnyDomainType checks if an entity has any of the specified domain types.
+func hasAnyDomainType(ent *models.CanonicalEntity, types []string) bool {
+	for _, dt := range ent.DomainTypes {
+		dtLower := strings.ToLower(dt)
+		for _, t := range types {
+			if dtLower == t {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// removeRoles returns a copy of roles with the specified roles removed.
+func removeRoles(roles []string, toRemove ...string) []string {
+	removeSet := make(map[string]bool, len(toRemove))
+	for _, r := range toRemove {
+		removeSet[r] = true
+	}
+	var result []string
+	for _, r := range roles {
+		if !removeSet[r] {
+			result = append(result, r)
+		}
+	}
+	return result
 }
 
 // joinEvidence concatenates all evidence text for an entity.

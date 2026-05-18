@@ -637,36 +637,36 @@ func TestAddSuffixAliasRules_PicksLongestMatch(t *testing.T) {
 
 // --- Clean conflicting functional roles tests ---
 
-func TestCleanConflictingFunctionalRoles_RemovesCourierFromNonCourier(t *testing.T) {
+func TestCleanConflictingFunctionalRoles_RemovesCourierFromLab(t *testing.T) {
 	entities := map[string]*models.CanonicalEntity{
-		"northlab": {
-			CanonicalName:   "northlab",
+		"northlab diagnostics": {
+			CanonicalName:   "northlab diagnostics",
 			BaseTypes:       []string{"organization"},
-			FunctionalRoles: []string{"external_partner", "medical_courier"},
-			Evidence: []models.EvidenceRef{
-				{Text: "NorthLab processes blood tests for CedarGate branches."},
-			},
+			DomainTypes:     []string{"laboratory"},
+			FunctionalRoles: []string{"external_partner", "service_provider", "medical_courier"},
 		},
-		"medex couriers": {
-			CanonicalName:   "medex couriers",
+		"quickcourier medical": {
+			CanonicalName:   "quickcourier medical",
 			BaseTypes:       []string{"organization"},
-			FunctionalRoles: []string{"medical_courier"},
-			Evidence: []models.EvidenceRef{
-				{Text: "MedEx Couriers provides courier services for sample delivery."},
-			},
+			DomainTypes:     []string{},
+			FunctionalRoles: []string{"transport_provider"},
 		},
 	}
 
 	cleanConflictingFunctionalRoles(entities)
 
-	if containsStr(entities["northlab"].FunctionalRoles, "medical_courier") {
-		t.Error("northlab should not have medical_courier — no courier evidence")
+	if containsStr(entities["northlab diagnostics"].FunctionalRoles, "medical_courier") {
+		t.Error("lab should not have medical_courier")
 	}
-	if !containsStr(entities["northlab"].FunctionalRoles, "external_partner") {
+	if !containsStr(entities["northlab diagnostics"].FunctionalRoles, "external_partner") {
 		t.Error("northlab should keep external_partner")
 	}
-	if !containsStr(entities["medex couriers"].FunctionalRoles, "medical_courier") {
-		t.Error("medex couriers should keep medical_courier — name contains 'courier'")
+	if !containsStr(entities["northlab diagnostics"].FunctionalRoles, "service_provider") {
+		t.Error("northlab should keep service_provider")
+	}
+	// quickcourier should get medical_courier added from name
+	if !containsStr(entities["quickcourier medical"].FunctionalRoles, "medical_courier") {
+		t.Error("quickcourier should get medical_courier from name")
 	}
 }
 

@@ -87,12 +87,22 @@ func checkAllConstraints(
 		return r
 	}
 
-	// Constraint 10: Relation signature must match schema (base types)
+	// Constraint 10: OFFERS cannot be inferred from contract/agreement evidence
+	if r := checkOffersEvidence(edge); !r.Pass {
+		return r
+	}
+
+	// Constraint 11: Relation-specific direction validation (lab->branch, courier->target)
+	if r := checkRelationDirection(edge, entities); !r.Pass {
+		return r
+	}
+
+	// Constraint 12: Relation signature must match schema (base types)
 	if r := checkRelationSignature(edge, entities); !r.Pass {
 		return r
 	}
 
-	// Constraint 11: Relation must satisfy functional role rules
+	// Constraint 13: Relation must satisfy functional role rules
 	if r := checkRelationRoles(edge, entities); !r.Pass {
 		return r
 	}
@@ -387,6 +397,134 @@ func checkNegativeRelationEvidence(edge models.CandidateEdge) HardConstraintResu
 		Pass:   false,
 		Reason: "negative relation " + edge.RelationID + " without negation in evidence: " + truncate(edge.EvidenceText, 80),
 	}
+}
+
+// checkOffersEvidence rejects OFFERS edges that are inferred from contract/agreement
+// evidence. These should be modeled as CONTRACTED_WITH or partner relations instead.
+func checkOffersEvidence(edge models.CandidateEdge) HardConstraintResult {
+	if edge.RelationID != "OFFERS" {
+		return HardConstraintResult{Pass: true}
+	}
+
+	ev := strings.ToLower(edge.EvidenceText)
+	if strings.Contains(ev, "contract with") ||
+		strings.Contains(ev, "agreement with") {
+		return HardConstraintResult{
+			Pass:   false,
+			Reason: "OFFERS inferred from contract/agreement evidence; prefer partner/contract relation",
+		}
+	}
+
+	return HardConstraintResult{Pass: true}
+}
+
+// checkRelationDirection validates direction for relations with strict source/target semantics.
+func checkRelationDirection(
+	edge models.CandidateEdge,
+	entities map[string]*models.CanonicalEntity,
+) HardConstraintResult {
+	switch edge.RelationID {
+	case "PROCESSES_TESTS_FOR":
+		return checkProcessesTestsDirection(edge, entities)
+	case "TRANSPORTS_SAMPLES_FOR":
+		return checkTransportsSamplesDirection(edge, entities)
+	default:
+		return HardConstraintResult{Pass: true}
+	}
+}
+
+// checkProcessesTestsDirection ensures PROCESSES_TESTS_FOR goes lab -> branch/org.
+// If reversed (branch -> lab), flips the direction.
+func checkProcessesTestsDirection(
+	edge models.CandidateEdge,
+	entities map[string]*models.CanonicalEntity,
+) HardConstraintResult {
+	from := entities[edge.FromMention]
+	to := entities[edge.ToMention]
+	if from == nil || to == nil {
+		return HardConstraintResult{Pass: true}
+	}
+
+	labTypes := []string{"laboratory", "diagnostics_lab", "lab"}
+	fromIsLab := hasAnyDomainTypeStr(from.DomainTypes, labTypes)
+	toIsLab := hasAnyDomainTypeStr(to.DomainTypes, labTypes)
+
+	fromIsBranch := from.HasRole("branch") || from.HasRole("operated_unit")
+	toIsBranch := to.HasRole("branch") || to.HasRole("operated_unit")
+
+	// Correct direction: lab -> branch
+	if fromIsLab && !toIsLab {
+		return HardConstraintResult{Pass: true}
+	}
+
+	// Reversed: branch -> lab — flip it
+	if fromIsBranch && toIsLab {
+		fixed := edge
+		fixed.FromMention, fixed.ToMention = edge.ToMention, edge.FromMention
+		return HardConstraintResult{
+			Pass:    false,
+			Reason:  "flipped PROCESSES_TESTS_FOR to lab -> branch",
+			FixEdge: &fixed,
+		}
+	}
+
+	// Non-lab source processing tests for another non-lab — reject
+	if !fromIsLab && toIsBranch {
+		return HardConstraintResult{
+			Pass:   false,
+			Reason: "PROCESSES_TESTS_FOR source " + edge.FromMention + " is not a lab",
+		}
+	}
+
+	return HardConstraintResult{Pass: true}
+}
+
+// checkTransportsSamplesDirection ensures TRANSPORTS_SAMPLES_FOR source is a courier,
+// and explicitly rejects labs as source.
+func checkTransportsSamplesDirection(
+	edge models.CandidateEdge,
+	entities map[string]*models.CanonicalEntity,
+) HardConstraintResult {
+	from := entities[edge.FromMention]
+	if from == nil {
+		return HardConstraintResult{Pass: true}
+	}
+
+	labTypes := []string{"laboratory", "diagnostics_lab", "lab"}
+	fromIsLab := hasAnyDomainTypeStr(from.DomainTypes, labTypes)
+
+	if fromIsLab {
+		return HardConstraintResult{
+			Pass:   false,
+			Reason: "TRANSPORTS_SAMPLES_FOR source cannot be lab/diagnostics provider: " + edge.FromMention,
+		}
+	}
+
+	fromIsCourier := from.HasRole("medical_courier") ||
+		from.HasRole("transport_provider") ||
+		from.HasRole("logistics_provider")
+
+	if !fromIsCourier {
+		return HardConstraintResult{
+			Pass:   false,
+			Reason: "TRANSPORTS_SAMPLES_FOR source must be courier/transport provider: " + edge.FromMention,
+		}
+	}
+
+	return HardConstraintResult{Pass: true}
+}
+
+// hasAnyDomainTypeStr checks if any domain type in the list matches any of the target types.
+func hasAnyDomainTypeStr(domainTypes []string, targets []string) bool {
+	for _, dt := range domainTypes {
+		dtLower := strings.ToLower(dt)
+		for _, t := range targets {
+			if dtLower == t {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkContractEvidence rejects CONTRACTED_WITH edges whose evidence does not
