@@ -131,6 +131,12 @@ func init() {
 		"HEADQUARTERED_AT": {
 			TargetRoles: []string{"headquarters"},
 		},
+		"OFFERS": {
+			ForbiddenSourceStatuses: []string{"planned"},
+		},
+		"PLANNED_SERVICE": {
+			SourceRoles: []string{"planned_unit", "branch", "operated_unit"},
+		},
 	}
 }
 
@@ -203,6 +209,7 @@ var PredefinedRelations = []RelationFamily{
 			{ID: "VISITS", Description: "Person visits/rotates to a location", SourceTypes: []string{"person"}, TargetTypes: []string{"organization", "location"}},
 			{ID: "PROVIDES_REMOTE_SERVICE_FOR", Description: "Person provides remote service for org", SourceTypes: []string{"person"}, TargetTypes: []string{"organization"}},
 			{ID: "PROVIDES_SERVICE_FOR", Description: "Person provides on-site service for org", SourceTypes: []string{"person"}, TargetTypes: []string{"organization"}},
+			{ID: "DOES_NOT_WORK_AT", Description: "Person explicitly does not work at entity (negative fact)", SourceTypes: []string{"person"}, TargetTypes: []string{"organization", "location"}},
 			{ID: "REPORTS_TO", Description: "Person reports to another person", SourceTypes: []string{"person"}, TargetTypes: []string{"person"}},
 			{ID: "FOUNDED_BY", Description: "Organization founded by person", SourceTypes: []string{"organization"}, TargetTypes: []string{"person"}},
 		},
@@ -211,15 +218,23 @@ var PredefinedRelations = []RelationFamily{
 		Category: "SERVICE",
 		Relations: []RelationDef{
 			{ID: "OFFERS", Description: "Organization offers a service/product", SourceTypes: []string{"organization"}, TargetTypes: []string{"service", "product"}},
+			{ID: "PLANNED_SERVICE", Description: "Organization plans to offer a service (not yet active)", SourceTypes: []string{"organization"}, TargetTypes: []string{"service", "product"}},
 			{ID: "DOES_NOT_OFFER", Description: "Organization explicitly does not offer", SourceTypes: []string{"organization"}, TargetTypes: []string{"service", "product"}},
 			{ID: "REQUIRES", Description: "Service/product requires another", TargetTypes: []string{"service", "product", "technology"}},
 			{ID: "SPECIALIZES_IN", Description: "Entity specializes in a domain/service", TargetTypes: []string{"service", "concept"}},
+			{ID: "SERVES_LANGUAGE", Description: "Entity serves clients in a language", TargetTypes: []string{"language"}},
+			{ID: "HAS_OPERATING_HOURS", Description: "Entity has specific operating schedule", TargetTypes: []string{"date_time", "concept"}},
 		},
 	},
 	{
 		Category: "PARTNER_CONTRACT",
 		Relations: []RelationDef{
 			{ID: "PARTNERS_WITH", Description: "Two independent entities partner", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}, Symmetric: true},
+			{ID: "FULFILLS_PRESCRIPTIONS_FOR", Description: "Partner fills prescriptions for organization", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
+			{ID: "PROCESSES_TESTS_FOR", Description: "Partner processes lab tests for organization", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
+			{ID: "PROCESSES_CORPORATE_PANELS_FOR", Description: "Partner handles corporate screening for org", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
+			{ID: "TRANSPORTS_SAMPLES_FOR", Description: "Partner transports samples for organization", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
+			{ID: "HANDLES_BILLING_FOR", Description: "Partner handles billing for organization", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
 			{ID: "CONTRACTED_WITH", Description: "Entity has a contract with another", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}, Symmetric: true},
 			{ID: "HAS_AGREEMENT_WITH", Description: "Entity has agreement with another", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}, Symmetric: true},
 			{ID: "NO_CONTRACT_WITH", Description: "Explicitly no contract between entities", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}, Symmetric: true},
@@ -233,6 +248,9 @@ var PredefinedRelations = []RelationFamily{
 			{ID: "INVOLVES", Description: "Event involves entity"},
 			{ID: "CAUSED_BY", Description: "Event caused by another event/entity"},
 			{ID: "AFFECTS", Description: "Event/action affects entity"},
+			{ID: "ESCALATED_TO", Description: "Incident/issue escalated to entity"},
+			{ID: "NOTIFIED", Description: "Entity was notified about event"},
+			{ID: "REPORTED_BY", Description: "Event reported by entity"},
 		},
 	},
 	{
@@ -300,15 +318,28 @@ func init() {
 		"ACTING_MANAGER_OF": "HAS_DEPUTY_MANAGER",
 
 		// Service
-		"PROVIDES":       "OFFERS",
-		"HAS_SERVICE":    "OFFERS",
-		"OFFERS_SERVICE": "OFFERS",
+		"PROVIDES":         "OFFERS",
+		"HAS_SERVICE":      "OFFERS",
+		"OFFERS_SERVICE":   "OFFERS",
+		"WILL_OFFER":       "PLANNED_SERVICE",
+		"PLANS_TO_OFFER":   "PLANNED_SERVICE",
+		"FUTURE_SERVICE":   "PLANNED_SERVICE",
+
+		// Negative people
+		"NOT_EMPLOYED_AT":  "DOES_NOT_WORK_AT",
+		"LEFT":             "DOES_NOT_WORK_AT",
+		"NO_LONGER_AT":     "DOES_NOT_WORK_AT",
 
 		// Partnership
-		"PARTNER_OF":            "PARTNERS_WITH",
-		"HAS_PARTNERSHIP_WITH":  "PARTNERS_WITH",
-		"FULFILLMENT_PARTNER_FOR": "PARTNERS_WITH",
-		"HAS_CONTRACT_WITH":     "CONTRACTED_WITH",
+		"PARTNER_OF":                  "PARTNERS_WITH",
+		"HAS_PARTNERSHIP_WITH":        "PARTNERS_WITH",
+		"FULFILLMENT_PARTNER_FOR":     "PARTNERS_WITH",
+		"HAS_CONTRACT_WITH":           "CONTRACTED_WITH",
+		"FILLS_PRESCRIPTIONS_FOR":     "FULFILLS_PRESCRIPTIONS_FOR",
+		"RUNS_LAB_TESTS_FOR":          "PROCESSES_TESTS_FOR",
+		"HANDLES_CORPORATE_PANELS_FOR":"PROCESSES_CORPORATE_PANELS_FOR",
+		"COURIER_FOR":                 "TRANSPORTS_SAMPLES_FOR",
+		"BILLS_FOR":                   "HANDLES_BILLING_FOR",
 
 		// Technology
 		"CONNECTED_TO":   "INTEGRATED_WITH",

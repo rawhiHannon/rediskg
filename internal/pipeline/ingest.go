@@ -64,8 +64,14 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	candidateGraph.Edges = normalizeRelations(candidateGraph.Edges)
 	log.Printf("  %d edges after normalization", len(candidateGraph.Edges))
 
+	// Phase 6b: Status-aware edge rewriting
+	log.Println("[6b/11] Rewriting status-aware edges...")
+	preRewrite := len(candidateGraph.Edges)
+	candidateGraph.Edges = rewriteStatusAwareEdges(candidateGraph.Edges, canonicalEntities)
+	log.Printf("  Status rewriting: %d -> %d edges", preRewrite, len(candidateGraph.Edges))
+
 	// Phase 7: Build alternative/conflict groups
-	log.Println("[7/10] Building alternative groups...")
+	log.Println("[7/11] Building alternative groups...")
 	candidateGraph.Edges = solver.BuildAlternativeGroups(candidateGraph.Edges)
 
 	// Phase 8: Apply hard constraints
@@ -197,15 +203,17 @@ func buildAliasMap(entities []models.CandidateEntity) map[string]string {
 		if canonical == "" {
 			canonical = e.Mention
 		}
+		canonical = strings.ToLower(strings.TrimSpace(canonical))
 
 		// Map mention to canonical if different
-		if e.Mention != canonical {
-			aliasMap[e.Mention] = canonical
+		mention := strings.ToLower(strings.TrimSpace(e.Mention))
+		if mention != canonical && mention != "" {
+			aliasMap[mention] = canonical
 		}
 
 		// Map declared aliases
 		for _, alias := range e.Aliases {
-			aliasName := strings.ToLower(alias.Text)
+			aliasName := strings.ToLower(strings.TrimSpace(alias.Text))
 			if aliasName != canonical && aliasName != "" {
 				aliasMap[aliasName] = canonical
 			}
@@ -400,7 +408,8 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 	// Store entities
 	for _, ent := range fg.Entities {
 		entity := models.Entity{
-			Name: ent.CanonicalName,
+			Name:       ent.CanonicalName,
+			Properties: map[string]interface{}{},
 		}
 		if len(ent.BaseTypes) > 0 {
 			entity.BaseType = ent.BaseTypes[0]
@@ -408,6 +417,13 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 		}
 		if len(ent.DomainTypes) > 0 {
 			entity.DomainType = ent.DomainTypes[0]
+			entity.Properties["domain_type"] = ent.DomainTypes[0]
+		}
+		if ent.Status != "" {
+			entity.Properties["status"] = ent.Status
+		}
+		if len(ent.FunctionalRoles) > 0 {
+			entity.Properties["functional_roles"] = strings.Join(ent.FunctionalRoles, ",")
 		}
 		if err := p.store.CreateEntity(entity); err != nil {
 			log.Printf("Warning: failed to store entity '%s': %v", ent.CanonicalName, err)
@@ -483,6 +499,21 @@ func postSolverValidation(fg *models.FinalGraph, aliasMap map[string]string) *mo
 		Entities: validEntities,
 		Edges:    validEdges,
 	}
+}
+
+// rewriteStatusAwareEdges converts edges based on entity status.
+// E.g., planned entity + OFFERS → PLANNED_SERVICE.
+func rewriteStatusAwareEdges(edges []models.CandidateEdge, entities map[string]*models.CanonicalEntity) []models.CandidateEdge {
+	for i := range edges {
+		e := &edges[i]
+		if e.RelationID == "OFFERS" {
+			fromEnt := entities[e.FromMention]
+			if fromEnt != nil && fromEnt.IsPlanned() {
+				e.RelationID = "PLANNED_SERVICE"
+			}
+		}
+	}
+	return edges
 }
 
 func containsStr(ss []string, s string) bool {

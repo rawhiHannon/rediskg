@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"rediskg/internal/schema"
 	"rediskg/pkg/models"
 )
 
@@ -57,10 +58,21 @@ func BuildAlternativeGroups(edges []models.CandidateEdge) []models.CandidateEdge
 // areCompetingRelations checks if a set of relations for the same entity pair
 // should be treated as alternatives (pick one) vs complementary (keep all).
 func areCompetingRelations(relations map[string]bool) bool {
+	// Resolve aliases so e.g. WORKS_AT and BASED_AT compete correctly
+	resolved := make(map[string]bool, len(relations))
+	for r := range relations {
+		canonical, _ := schema.ResolveRelation(r)
+		if canonical == "" {
+			canonical = r
+		}
+		resolved[canonical] = true
+	}
+
 	// Person-location relations compete with each other
 	personLocationRels := map[string]bool{
 		"BASED_AT": true, "VISITS": true, "PROVIDES_SERVICE_FOR": true,
 		"PROVIDES_REMOTE_SERVICE_FOR": true, "MANAGES": true,
+		"DOES_NOT_WORK_AT": true,
 	}
 
 	// Structure relations compete
@@ -76,7 +88,7 @@ func areCompetingRelations(relations map[string]bool) bool {
 	personCount := 0
 	structCount := 0
 	managerCount := 0
-	for r := range relations {
+	for r := range resolved {
 		if personLocationRels[r] {
 			personCount++
 		}
