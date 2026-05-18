@@ -451,12 +451,14 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 			evidence = edge.Evidence[0].Text
 		}
 		edgeRecord := models.EdgeRecord{
-			Node1:    edge.From,
-			Node2:    edge.To,
-			Edge:     edge.RelationID,
-			Weight:   edge.Weight,
-			ChunkIDs: edge.ChunkIDs,
-			Evidence: evidence,
+			Node1:     edge.From,
+			Node2:     edge.To,
+			Edge:      edge.RelationID,
+			Weight:    edge.Weight,
+			ChunkIDs:  edge.ChunkIDs,
+			Evidence:  evidence,
+			Status:    edge.Status,
+			Condition: edge.Condition,
 		}
 		if err := p.store.CreateEdge(edgeRecord); err != nil {
 			log.Printf("Warning: failed to store edge %s -[%s]-> %s: %v",
@@ -521,14 +523,33 @@ func postSolverValidation(fg *models.FinalGraph, aliasMap map[string]string) *mo
 }
 
 // rewriteStatusAwareEdges converts edges based on entity status.
-// E.g., planned entity + OFFERS → PLANNED_SERVICE.
+// - Planned entity + OFFERS → PLANNED_SERVICE
+// - Planned entity + HAS_BRANCH → HAS_PLANNED_BRANCH
+// - Any edge touching a planned entity gets status="planned"
 func rewriteStatusAwareEdges(edges []models.CandidateEdge, entities map[string]*models.CanonicalEntity) []models.CandidateEdge {
 	for i := range edges {
 		e := &edges[i]
-		if e.RelationID == "OFFERS" {
-			fromEnt := entities[e.FromMention]
-			if fromEnt != nil && fromEnt.IsPlanned() {
-				e.RelationID = "PLANNED_SERVICE"
+		fromEnt := entities[e.FromMention]
+		toEnt := entities[e.ToMention]
+
+		fromPlanned := fromEnt != nil && fromEnt.IsPlanned()
+		toPlanned := toEnt != nil && toEnt.IsPlanned()
+
+		// Rewrite specific relation IDs for planned entities
+		if fromPlanned || toPlanned {
+			switch e.RelationID {
+			case "OFFERS":
+				if fromPlanned {
+					e.RelationID = "PLANNED_SERVICE"
+				}
+			case "HAS_BRANCH":
+				if toPlanned {
+					e.RelationID = "HAS_PLANNED_BRANCH"
+				}
+			}
+			// Mark all edges touching planned entities with planned status
+			if e.Status == "" {
+				e.Status = "planned"
 			}
 		}
 	}
@@ -589,10 +610,12 @@ func filterRawValueEntities(entities []models.CandidateEntity) []models.Candidat
 
 // isRawValueEntity checks if an entity is a raw date/time/quantity value.
 func isRawValueEntity(e models.CandidateEntity) bool {
-	// Check if primary base type is date_time or quantity
-	if len(e.BaseTypes) > 0 {
-		primary := e.BaseTypes[0].Type
-		if primary == "date_time" || primary == "quantity" || primary == "money" || primary == "identifier" {
+	rawTypes := map[string]bool{
+		"date_time": true, "quantity": true, "money": true, "identifier": true,
+	}
+	// Check ALL base types, not just the first — if any scored type is raw with high confidence, filter
+	for _, bt := range e.BaseTypes {
+		if rawTypes[bt.Type] && bt.Score >= 0.5 {
 			return true
 		}
 	}

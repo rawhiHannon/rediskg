@@ -1,3 +1,4 @@
+// Deprecated: Old proximity edge generation from pre-schema pipeline. Not used in active pipeline.
 package graph
 
 import (

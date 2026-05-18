@@ -1,3 +1,7 @@
+// Deprecated: This file contains old extraction prompts from the pre-schema pipeline.
+// The active pipeline uses extract_schema.go instead.
+// Do NOT use ExtractEntitiesFromChunk, ExtractRelationsFromChunk, or VerifyTriplesRich
+// for production KG ingestion.
 package llm
 
 import (

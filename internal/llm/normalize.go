@@ -1,3 +1,6 @@
+// Deprecated: This file contains old LLM schema normalization from the pre-schema pipeline.
+// The active pipeline uses schema/ontology.go for predefined relations and
+// extract_schema.go for schema-constrained extraction.
 package llm
 
 import (

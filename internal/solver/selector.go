@@ -223,6 +223,8 @@ func buildFinal(edges []models.CandidateEdge, entities map[string]*models.Canoni
 		if e.ChunkID != "" {
 			kgEdge.ChunkIDs = []string{e.ChunkID}
 		}
+		kgEdge.Status = e.Status
+		kgEdge.Condition = e.Condition
 		fg.Edges = append(fg.Edges, kgEdge)
 	}
 

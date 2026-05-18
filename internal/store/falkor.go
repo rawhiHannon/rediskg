@@ -93,7 +93,12 @@ func (s *FalkorStore) CreateEntity(entity models.Entity) error {
 	}
 
 	// Add base type as additional label for typed queries (e.g., MATCH (p:Person))
-	typeLabel := toTypeLabel(entityType)
+	// Prefer BaseType over Type to ensure we label with the upper-ontology type
+	labelSource := strings.ToLower(strings.TrimSpace(entity.BaseType))
+	if labelSource == "" {
+		labelSource = entityType
+	}
+	typeLabel := toTypeLabel(labelSource)
 	if typeLabel != "" && typeLabel != "Concept" {
 		labelCypher := fmt.Sprintf(
 			`MATCH (n:Concept {name: '%s'}) SET n:%s`,
@@ -157,6 +162,17 @@ func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 	}
 
 	evidenceStr := escapeCypher(record.Evidence)
+	statusStr := escapeCypher(record.Status)
+	conditionStr := escapeCypher(record.Condition)
+
+	// Build optional property sets for status and condition
+	extraCreate := ""
+	if statusStr != "" {
+		extraCreate += fmt.Sprintf(", r.status = '%s'", statusStr)
+	}
+	if conditionStr != "" {
+		extraCreate += fmt.Sprintf(", r.condition = '%s'", conditionStr)
+	}
 
 	cypher := fmt.Sprintf(
 		`MERGE (a:Concept {name: '%s'})
@@ -164,13 +180,13 @@ func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 		 MERGE (b:Concept {name: '%s'})
 		 ON CREATE SET b.name = '%s'%s
 		 MERGE (a)-[r:%s]->(b)
-		 ON CREATE SET r.description = '%s', r.weight = %f, r.inferred = %t, r.chunk_ids = '%s', r.evidence = '%s'
-		 ON MATCH SET r.weight = r.weight + %f, r.chunk_ids = r.chunk_ids + ',%s'`,
+		 ON CREATE SET r.description = '%s', r.weight = %f, r.inferred = %t, r.chunk_ids = '%s', r.evidence = '%s'%s
+		 ON MATCH SET r.weight = r.weight + %f, r.chunk_ids = r.chunk_ids + ',%s', r.evidence = CASE WHEN r.evidence CONTAINS '%s' THEN r.evidence ELSE r.evidence + '\n---\n' + '%s' END`,
 		n1, n1,
 		n2, n2, typeSetClause,
 		edgeType, edgeDesc,
-		record.Weight, record.Inferred, strings.Join(record.ChunkIDs, ","), evidenceStr,
-		record.Weight, strings.Join(record.ChunkIDs, ","),
+		record.Weight, record.Inferred, strings.Join(record.ChunkIDs, ","), evidenceStr, extraCreate,
+		record.Weight, strings.Join(record.ChunkIDs, ","), evidenceStr, evidenceStr,
 	)
 
 	_, err := s.Query(cypher)

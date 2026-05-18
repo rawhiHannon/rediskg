@@ -1,3 +1,6 @@
+// Deprecated: This file contains old LLM type governance from the pre-schema pipeline.
+// The active pipeline uses predefined schema in schema/ontology.go with
+// hard constraints in solver/hard_constraints.go.
 package llm
 
 import (

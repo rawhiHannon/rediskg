@@ -1,3 +1,6 @@
+// Deprecated: This file contains old edge merging from the pre-schema pipeline.
+// The active pipeline uses pipeline/ingest.go with solver/selector.go for
+// deduplication and conflict resolution.
 package graph
 
 import (

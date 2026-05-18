@@ -1,3 +1,4 @@
+// Deprecated: Old triple validation from pre-schema pipeline. Active pipeline uses solver/hard_constraints.go.
 package graph
 
 import (

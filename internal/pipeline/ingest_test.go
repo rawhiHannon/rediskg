@@ -121,8 +121,47 @@ func TestRewriteStatusAwareEdges_PlannedOffersBecomesPlannedService(t *testing.T
 	if result[0].RelationID != "PLANNED_SERVICE" {
 		t.Errorf("expected planned entity OFFERS to become PLANNED_SERVICE, got %q", result[0].RelationID)
 	}
+	if result[0].Status != "planned" {
+		t.Errorf("expected planned entity edge to have status 'planned', got %q", result[0].Status)
+	}
 	if result[1].RelationID != "OFFERS" {
 		t.Errorf("expected active entity OFFERS to remain OFFERS, got %q", result[1].RelationID)
+	}
+	if result[1].Status != "" {
+		t.Errorf("expected active entity edge to have empty status, got %q", result[1].Status)
+	}
+}
+
+func TestRewriteStatusAwareEdges_HAS_BRANCH_ToPlannedBecomesHAS_PLANNED_BRANCH(t *testing.T) {
+	entities := map[string]*models.CanonicalEntity{
+		"cedargate": {
+			CanonicalName:   "cedargate",
+			Status:          "active",
+			FunctionalRoles: []string{"parent_organization"},
+		},
+		"jerusalem south": {
+			CanonicalName:   "jerusalem south",
+			Status:          "planned",
+			FunctionalRoles: []string{"planned_unit", "branch"},
+		},
+	}
+
+	edges := []models.CandidateEdge{
+		{
+			FromMention: "cedargate",
+			RelationID:  "HAS_BRANCH",
+			ToMention:   "jerusalem south",
+			Confidence:  0.85,
+		},
+	}
+
+	result := rewriteStatusAwareEdges(edges, entities)
+
+	if result[0].RelationID != "HAS_PLANNED_BRANCH" {
+		t.Errorf("expected HAS_BRANCH to planned target to become HAS_PLANNED_BRANCH, got %q", result[0].RelationID)
+	}
+	if result[0].Status != "planned" {
+		t.Errorf("expected status 'planned', got %q", result[0].Status)
 	}
 }
 
@@ -256,6 +295,11 @@ func TestFilterRawValueEntities(t *testing.T) {
 		{Mention: "10:00", BaseTypes: []models.ScoredType{{Type: "date_time", Score: 0.8}}},
 		{Mention: "dr. smith", BaseTypes: []models.ScoredType{{Type: "person", Score: 0.9}}},
 		{Mention: "50000", BaseTypes: []models.ScoredType{{Type: "money", Score: 0.7}}},
+		// Multi-type: concept first but date_time second with high score — should still be filtered
+		{Mention: "monthly", BaseTypes: []models.ScoredType{
+			{Type: "concept", Score: 0.6},
+			{Type: "date_time", Score: 0.9},
+		}},
 	}
 
 	result := filterRawValueEntities(entities)
@@ -264,8 +308,8 @@ func TestFilterRawValueEntities(t *testing.T) {
 		t.Errorf("expected 2 entities after filtering, got %d", len(result))
 	}
 	for _, e := range result {
-		if e.BaseTypes[0].Type == "date_time" || e.BaseTypes[0].Type == "money" {
-			t.Errorf("raw value entity %q should have been filtered", e.Mention)
+		if e.Mention != "cedargate" && e.Mention != "dr. smith" {
+			t.Errorf("unexpected entity %q survived filtering", e.Mention)
 		}
 	}
 }

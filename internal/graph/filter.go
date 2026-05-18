@@ -1,3 +1,4 @@
+// Deprecated: Old stop-word filtering from pre-schema pipeline. Active pipeline uses pipeline/ingest.go filterRawValueEntities.
 package graph
 
 import (

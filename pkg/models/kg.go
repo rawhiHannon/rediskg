@@ -16,12 +16,14 @@ type KGEntity struct {
 
 // KGEdge is the final materialized edge in the knowledge graph.
 type KGEdge struct {
-	From       string   `json:"from"`        // canonical entity name
-	RelationID string   `json:"relation_id"` // stable internal relation ID
-	To         string   `json:"to"`          // canonical entity name
+	From       string        `json:"from"`        // canonical entity name
+	RelationID string        `json:"relation_id"` // stable internal relation ID
+	To         string        `json:"to"`          // canonical entity name
 	Evidence   []EvidenceRef `json:"evidence"`
-	Weight     float64  `json:"weight"`
-	ChunkIDs   []string `json:"chunk_ids"`
+	Weight     float64       `json:"weight"`
+	ChunkIDs   []string      `json:"chunk_ids"`
+	Status     string        `json:"status,omitempty"`    // active, planned, backup, conditional
+	Condition  string        `json:"condition,omitempty"` // conditional context
 }
 
 // LangText is a text string with its language.
@@ -71,6 +73,8 @@ type CandidateEdge struct {
 	SchemaFitScore    float64 `json:"schema_fit_score"`
 	Confidence        float64 `json:"confidence"`
 	AlternativeGroup  string  `json:"alternative_group,omitempty"`
+	Status            string  `json:"status,omitempty"`    // active, planned, backup, conditional
+	Condition         string  `json:"condition,omitempty"` // conditional context (e.g., "during Al-Amal downtime")
 }
 
 // CandidateGraph holds all extraction output before canonicalization and solving.

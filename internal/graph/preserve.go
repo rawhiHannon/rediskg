@@ -1,3 +1,4 @@
+// Deprecated: Old entity preservation from pre-schema pipeline. Active pipeline uses pipeline/ingest.go postSolverValidation.
 package graph
 
 import (
