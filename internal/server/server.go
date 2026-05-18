@@ -204,8 +204,11 @@ func (s *Server) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 // handleExport returns the full graph as JSON (all nodes + edges, no pagination).
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	type ExportNode struct {
-		Name string `json:"name"`
-		Type string `json:"type,omitempty"`
+		Name            string `json:"name"`
+		Type            string `json:"type,omitempty"`
+		Status          string `json:"status,omitempty"`
+		FunctionalRoles string `json:"functional_roles,omitempty"`
+		DomainType      string `json:"domain_type,omitempty"`
 	}
 	type ExportEdge struct {
 		From        string  `json:"from"`
@@ -213,6 +216,10 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		Relation    string  `json:"relation"`
 		Weight      float64 `json:"weight,omitempty"`
 		Description string  `json:"description,omitempty"`
+		Status      string  `json:"status,omitempty"`
+		Condition   string  `json:"condition,omitempty"`
+		Evidence    string  `json:"evidence,omitempty"`
+		ChunkIDs    string  `json:"chunk_ids,omitempty"`
 	}
 	type ExportData struct {
 		Nodes []ExportNode `json:"nodes"`
@@ -222,7 +229,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	export := ExportData{}
 
 	// Get all nodes
-	nodeResult, err := s.store.ROQuery(`MATCH (n) WHERE NOT n:__Schema__ RETURN n.name, n.type ORDER BY n.name`)
+	nodeResult, err := s.store.ROQuery(`MATCH (n) WHERE NOT n:__Schema__ RETURN n.name, n.type, n.status, n.functional_roles, n.domain_type ORDER BY n.name`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -236,8 +243,22 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 					if len(cols) >= 2 {
 						typ, _ = cols[1].(string)
 					}
+					status, roles, domainType := "", "", ""
+					if len(cols) >= 3 {
+						status, _ = cols[2].(string)
+					}
+					if len(cols) >= 4 {
+						roles, _ = cols[3].(string)
+					}
+					if len(cols) >= 5 {
+						domainType, _ = cols[4].(string)
+					}
 					if name != "" {
-						export.Nodes = append(export.Nodes, ExportNode{Name: name, Type: typ})
+						export.Nodes = append(export.Nodes, ExportNode{
+							Name: name, Type: typ,
+							Status: status, FunctionalRoles: roles,
+							DomainType: domainType,
+						})
 					}
 				}
 			}
@@ -245,7 +266,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get all edges
-	edgeResult, err := s.store.ROQuery(`MATCH (a)-[r]->(b) RETURN a.name, type(r), b.name, r.weight, r.description`)
+	edgeResult, err := s.store.ROQuery(`MATCH (a)-[r]->(b) RETURN a.name, type(r), b.name, r.weight, r.description, r.status, r.condition, r.evidence, r.chunk_ids`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -267,10 +288,25 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 					if len(cols) >= 5 {
 						desc, _ = cols[4].(string)
 					}
+					status, condition, evidence, chunkIDs := "", "", "", ""
+					if len(cols) >= 6 {
+						status, _ = cols[5].(string)
+					}
+					if len(cols) >= 7 {
+						condition, _ = cols[6].(string)
+					}
+					if len(cols) >= 8 {
+						evidence, _ = cols[7].(string)
+					}
+					if len(cols) >= 9 {
+						chunkIDs, _ = cols[8].(string)
+					}
 					if from != "" && to != "" {
 						export.Edges = append(export.Edges, ExportEdge{
 							From: from, To: to, Relation: rel,
 							Weight: weight, Description: desc,
+							Status: status, Condition: condition,
+							Evidence: evidence, ChunkIDs: chunkIDs,
 						})
 					}
 				}
