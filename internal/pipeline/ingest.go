@@ -73,7 +73,10 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	canonicalEntities := selectCanonicalEntities(candidateGraph.Entities, aliasMap)
 	log.Printf("  %d canonical entities", len(canonicalEntities))
 
-	// Phase 4b: Fix event entity statuses (incidents != planned)
+	// Phase 4b: Clean conflicting functional roles
+	cleanConflictingFunctionalRoles(canonicalEntities)
+
+	// Phase 4c: Fix event entity statuses (incidents != planned)
 	fixEntityStatuses(canonicalEntities)
 
 	// Phase 5: Rewrite all edges to canonical entity names
@@ -667,6 +670,10 @@ func containsStr(ss []string, s string) bool {
 // addSuffixAliasRules merges entities that differ only by a trailing suffix
 // like " branch", " clinic", " center", " office" when the shorter form also exists.
 // E.g., "cedargate jerusalem south branch" → "cedargate jerusalem south".
+//
+// Also handles short branch aliases: if a short name like "jerusalem south branch"
+// has all its non-suffix tokens contained in a longer canonical name like
+// "cedargate jerusalem south", map the short form to the longer canonical.
 func addSuffixAliasRules(entities []models.CandidateEntity, aliasMap map[string]string) {
 	existing := make(map[string]bool, len(entities))
 	for _, e := range entities {
@@ -678,17 +685,67 @@ func addSuffixAliasRules(entities []models.CandidateEntity, aliasMap map[string]
 	}
 
 	suffixes := []string{" branch", " clinic", " center", " office", " site"}
+
+	// Pass 1: exact suffix stripping (original logic)
 	for name := range existing {
 		for _, suffix := range suffixes {
 			if strings.HasSuffix(name, suffix) {
 				shorter := strings.TrimSpace(strings.TrimSuffix(name, suffix))
 				if shorter != "" && existing[shorter] {
-					// Only add if not already mapped elsewhere
 					if _, already := aliasMap[name]; !already {
 						aliasMap[name] = shorter
 					}
 				}
 			}
+		}
+	}
+
+	// Pass 2: short branch alias → longer canonical
+	// For names ending with a suffix, strip the suffix to get core tokens,
+	// then find the longest existing canonical that contains ALL core tokens.
+	for name := range existing {
+		if _, already := aliasMap[name]; already {
+			continue // already mapped in pass 1
+		}
+		for _, suffix := range suffixes {
+			if !strings.HasSuffix(name, suffix) {
+				continue
+			}
+			core := strings.TrimSpace(strings.TrimSuffix(name, suffix))
+			if core == "" {
+				continue
+			}
+			coreTokens := strings.Fields(core)
+			if len(coreTokens) == 0 {
+				continue
+			}
+
+			// Find the longest canonical that contains all core tokens
+			var bestMatch string
+			for candidate := range existing {
+				if candidate == name {
+					continue
+				}
+				// Candidate must be longer (more specific)
+				if len(candidate) <= len(core) {
+					continue
+				}
+				// All core tokens must appear in the candidate
+				allFound := true
+				for _, tok := range coreTokens {
+					if !strings.Contains(candidate, tok) {
+						allFound = false
+						break
+					}
+				}
+				if allFound && (bestMatch == "" || len(candidate) > len(bestMatch)) {
+					bestMatch = candidate
+				}
+			}
+			if bestMatch != "" {
+				aliasMap[name] = bestMatch
+			}
+			break // only process first matching suffix
 		}
 	}
 }
@@ -892,6 +949,38 @@ func fixEntityStatuses(entities map[string]*models.CanonicalEntity) {
 				ent.Status = "historical"
 			}
 		}
+	}
+}
+
+// cleanConflictingFunctionalRoles removes functional roles that conflict with
+// the entity's actual nature. For example, an organization that is not actually
+// a courier service should not have "medical_courier" or "transport_provider".
+func cleanConflictingFunctionalRoles(entities map[string]*models.CanonicalEntity) {
+	// Roles that require specific evidence — remove if entity lacks supporting signals
+	courierRoles := map[string]bool{
+		"medical_courier":    true,
+		"transport_provider": true,
+	}
+	courierKeywords := []string{
+		"courier", "transport", "delivery", "logistics", "dispatch", "shipping",
+	}
+
+	for _, ent := range entities {
+		var cleaned []string
+		for _, role := range ent.FunctionalRoles {
+			if courierRoles[role] {
+				// Only keep if the entity name or evidence supports it
+				nameLower := strings.ToLower(ent.CanonicalName)
+				evLower := strings.ToLower(joinEvidence(ent.Evidence))
+				if containsAny(nameLower, courierKeywords) || containsAny(evLower, courierKeywords) {
+					cleaned = append(cleaned, role)
+				}
+				// else: silently drop the conflicting role
+			} else {
+				cleaned = append(cleaned, role)
+			}
+		}
+		ent.FunctionalRoles = cleaned
 	}
 }
 

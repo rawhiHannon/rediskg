@@ -82,12 +82,17 @@ func checkAllConstraints(
 		return r
 	}
 
-	// Constraint 9: Relation signature must match schema (base types)
+	// Constraint 9: CONTRACTED_WITH must have contract/agreement evidence
+	if r := checkContractEvidence(edge); !r.Pass {
+		return r
+	}
+
+	// Constraint 10: Relation signature must match schema (base types)
 	if r := checkRelationSignature(edge, entities); !r.Pass {
 		return r
 	}
 
-	// Constraint 10: Relation must satisfy functional role rules
+	// Constraint 11: Relation must satisfy functional role rules
 	if r := checkRelationRoles(edge, entities); !r.Pass {
 		return r
 	}
@@ -381,6 +386,33 @@ func checkNegativeRelationEvidence(edge models.CandidateEdge) HardConstraintResu
 	return HardConstraintResult{
 		Pass:   false,
 		Reason: "negative relation " + edge.RelationID + " without negation in evidence: " + truncate(edge.EvidenceText, 80),
+	}
+}
+
+// checkContractEvidence rejects CONTRACTED_WITH edges whose evidence does not
+// mention a contract or agreement. This prevents the LLM from hallucinating
+// contractual relationships from generic partnership language.
+func checkContractEvidence(edge models.CandidateEdge) HardConstraintResult {
+	if edge.RelationID != "CONTRACTED_WITH" {
+		return HardConstraintResult{Pass: true}
+	}
+
+	ev := strings.ToLower(edge.EvidenceText)
+	contractIndicators := []string{
+		"contract", "agreement", "contracted", "signed",
+		"engagement letter", "service agreement", "memorandum",
+		"mou", "sla",
+	}
+
+	for _, indicator := range contractIndicators {
+		if strings.Contains(ev, indicator) {
+			return HardConstraintResult{Pass: true}
+		}
+	}
+
+	return HardConstraintResult{
+		Pass:   false,
+		Reason: "CONTRACTED_WITH without contract/agreement evidence: " + truncate(edge.EvidenceText, 80),
 	}
 }
 

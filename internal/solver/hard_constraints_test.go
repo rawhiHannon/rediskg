@@ -225,3 +225,45 @@ func TestCheckNegativeRelationEvidence_AllowsWithNegation(t *testing.T) {
 		t.Error("negative relation with negation evidence should be allowed")
 	}
 }
+
+// --- Contract evidence tests ---
+
+func TestCheckContractEvidence_RejectsWithoutContractLanguage(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "akko medical",
+			RelationID:   "CONTRACTED_WITH",
+			ToMention:    "al-amal laboratory",
+			EvidenceText: "Akko Medical Center works closely with Al-Amal Laboratory.",
+		},
+	}
+
+	result := ApplyHardConstraints(edges, map[string]*models.CanonicalEntity{
+		"akko medical":       {CanonicalName: "akko medical", BaseTypes: []string{"organization"}},
+		"al-amal laboratory": {CanonicalName: "al-amal laboratory", BaseTypes: []string{"organization"}},
+	}, map[string]string{})
+
+	if len(result) != 0 {
+		t.Error("CONTRACTED_WITH without contract evidence should be rejected")
+	}
+}
+
+func TestCheckContractEvidence_AllowsWithContractLanguage(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "akko medical",
+			RelationID:   "CONTRACTED_WITH",
+			ToMention:    "al-amal laboratory",
+			EvidenceText: "Akko Medical Center has a service agreement with Al-Amal Laboratory.",
+		},
+	}
+
+	result := ApplyHardConstraints(edges, map[string]*models.CanonicalEntity{
+		"akko medical":       {CanonicalName: "akko medical", BaseTypes: []string{"organization"}},
+		"al-amal laboratory": {CanonicalName: "al-amal laboratory", BaseTypes: []string{"organization"}},
+	}, map[string]string{})
+
+	if len(result) != 1 {
+		t.Error("CONTRACTED_WITH with contract evidence should be allowed")
+	}
+}
