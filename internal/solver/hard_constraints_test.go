@@ -183,3 +183,45 @@ func TestCheckAliasCompatibility_AllowsCompatible(t *testing.T) {
 		t.Error("ALIAS_OF between compatible organizations should be allowed")
 	}
 }
+
+// --- Negative relation evidence tests ---
+
+func TestCheckNegativeRelationEvidence_RejectsWithoutNegation(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "balancecare",
+			RelationID:   "DOES_NOT_HANDLE_REIMBURSEMENT_FOR",
+			ToMention:    "carmel west",
+			EvidenceText: "BalanceCare Insurance Services handles private reimbursement submissions for Carmel West patients.",
+		},
+	}
+
+	result := ApplyHardConstraints(edges, map[string]*models.CanonicalEntity{
+		"balancecare": {CanonicalName: "balancecare", BaseTypes: []string{"organization"}},
+		"carmel west": {CanonicalName: "carmel west", BaseTypes: []string{"organization"}},
+	}, map[string]string{})
+
+	if len(result) != 0 {
+		t.Error("negative relation with positive evidence should be rejected")
+	}
+}
+
+func TestCheckNegativeRelationEvidence_AllowsWithNegation(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "balancecare",
+			RelationID:   "DOES_NOT_HANDLE_BILLING_FOR",
+			ToMention:    "haifa central",
+			EvidenceText: "It does not handle Haifa Central claims.",
+		},
+	}
+
+	result := ApplyHardConstraints(edges, map[string]*models.CanonicalEntity{
+		"balancecare":  {CanonicalName: "balancecare", BaseTypes: []string{"organization"}},
+		"haifa central": {CanonicalName: "haifa central", BaseTypes: []string{"organization"}},
+	}, map[string]string{})
+
+	if len(result) != 1 {
+		t.Error("negative relation with negation evidence should be allowed")
+	}
+}

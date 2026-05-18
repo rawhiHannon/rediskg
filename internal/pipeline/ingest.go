@@ -65,6 +65,7 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	// Phase 3: Group aliases and deduplicate entity mentions
 	log.Println("[3/14] Grouping aliases...")
 	aliasMap := buildAliasMap(candidateGraph.Entities)
+	addSuffixAliasRules(candidateGraph.Entities, aliasMap)
 	log.Printf("  Found %d alias mappings", len(aliasMap))
 
 	// Phase 4: Select canonical entities (merge duplicates, pick best types)
@@ -663,6 +664,35 @@ func containsStr(ss []string, s string) bool {
 	return false
 }
 
+// addSuffixAliasRules merges entities that differ only by a trailing suffix
+// like " branch", " clinic", " center", " office" when the shorter form also exists.
+// E.g., "cedargate jerusalem south branch" → "cedargate jerusalem south".
+func addSuffixAliasRules(entities []models.CandidateEntity, aliasMap map[string]string) {
+	existing := make(map[string]bool, len(entities))
+	for _, e := range entities {
+		name := strings.ToLower(strings.TrimSpace(e.CanonicalName))
+		if name == "" {
+			name = strings.ToLower(strings.TrimSpace(e.Mention))
+		}
+		existing[name] = true
+	}
+
+	suffixes := []string{" branch", " clinic", " center", " office", " site"}
+	for name := range existing {
+		for _, suffix := range suffixes {
+			if strings.HasSuffix(name, suffix) {
+				shorter := strings.TrimSpace(strings.TrimSuffix(name, suffix))
+				if shorter != "" && existing[shorter] {
+					// Only add if not already mapped elsewhere
+					if _, already := aliasMap[name]; !already {
+						aliasMap[name] = shorter
+					}
+				}
+			}
+		}
+	}
+}
+
 // containsAny checks if s contains any of the substrings.
 func containsAny(s string, subs []string) bool {
 	for _, sub := range subs {
@@ -731,7 +761,7 @@ func annotateConditionalEdges(edges []models.CandidateEdge) []models.CandidateEd
 		// Determine status — only mark backup for eligible partner/service relations
 		if containsAny(ev, backupTriggers) {
 			if isBackupEligibleRelation(e.RelationID) {
-				if e.Status == "" || e.Status == "active" {
+				if e.Status == "" || e.Status == "active" || e.Status == "conditional" || e.Status == "unknown" {
 					e.Status = "backup"
 				}
 			} else if e.Status == "" || e.Status == "active" {

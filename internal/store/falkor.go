@@ -452,11 +452,6 @@ func toEdgeType(s string) string {
 	// Trim leading/trailing underscores and collapse multiples
 	parts := strings.FieldsFunc(s, func(r rune) bool { return r == '_' })
 
-	// Keep at most 4 words to prevent verbose edge types
-	if len(parts) > 4 {
-		parts = parts[:4]
-	}
-
 	result := strings.Join(parts, "_")
 	if result == "" {
 		return "RELATES_TO"

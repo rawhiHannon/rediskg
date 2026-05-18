@@ -77,12 +77,17 @@ func checkAllConstraints(
 		return r
 	}
 
-	// Constraint 8: Relation signature must match schema (base types)
+	// Constraint 8: Negative relations must have negation in evidence
+	if r := checkNegativeRelationEvidence(edge); !r.Pass {
+		return r
+	}
+
+	// Constraint 9: Relation signature must match schema (base types)
 	if r := checkRelationSignature(edge, entities); !r.Pass {
 		return r
 	}
 
-	// Constraint 9: Relation must satisfy functional role rules
+	// Constraint 10: Relation must satisfy functional role rules
 	if r := checkRelationRoles(edge, entities); !r.Pass {
 		return r
 	}
@@ -343,6 +348,48 @@ func containsStr(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// checkNegativeRelationEvidence rejects negative relations (DOES_NOT_*, NO_CONTRACT_WITH)
+// when the evidence text does not contain explicit negation language.
+// This catches LLM hallucinations where a positive fact gets a negative relation ID.
+func checkNegativeRelationEvidence(edge models.CandidateEdge) HardConstraintResult {
+	if !strings.HasPrefix(edge.RelationID, "DOES_NOT_") &&
+		edge.RelationID != "NO_CONTRACT_WITH" {
+		return HardConstraintResult{Pass: true}
+	}
+
+	ev := strings.ToLower(edge.EvidenceText)
+
+	negationIndicators := []string{
+		"does not", "doesn't", "do not", "did not", "didn't",
+		"no contract", "no agreement", "no active contract",
+		"not available", "not responsible",
+		"not provide", "does not provide",
+		"not handle", "does not handle",
+		"not process", "does not process",
+		"not offer", "does not offer",
+		"no longer", "not covered by",
+	}
+
+	for _, indicator := range negationIndicators {
+		if strings.Contains(ev, indicator) {
+			return HardConstraintResult{Pass: true}
+		}
+	}
+
+	return HardConstraintResult{
+		Pass:   false,
+		Reason: "negative relation " + edge.RelationID + " without negation in evidence: " + truncate(edge.EvidenceText, 80),
+	}
+}
+
+// truncate shortens a string to maxLen, appending "..." if truncated.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // checkRawValueEndpoint rejects edges whose endpoints look like raw temporal/quantity values.

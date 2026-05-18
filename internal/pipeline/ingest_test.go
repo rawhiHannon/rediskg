@@ -570,3 +570,52 @@ func TestResolveNegativeConflicts_BillingOverride(t *testing.T) {
 		t.Error("unrelated HANDLES_BILLING_FOR should be preserved")
 	}
 }
+
+// --- Suffix alias rule tests ---
+
+func TestAddSuffixAliasRules_MergesBranchSuffix(t *testing.T) {
+	entities := []models.CandidateEntity{
+		{Mention: "cedargate jerusalem south", CanonicalName: "cedargate jerusalem south"},
+		{Mention: "cedargate jerusalem south branch", CanonicalName: "cedargate jerusalem south branch"},
+	}
+
+	aliasMap := map[string]string{}
+	addSuffixAliasRules(entities, aliasMap)
+
+	if aliasMap["cedargate jerusalem south branch"] != "cedargate jerusalem south" {
+		t.Errorf("expected suffix merge, got %q", aliasMap["cedargate jerusalem south branch"])
+	}
+}
+
+func TestAddSuffixAliasRules_NoMergeWithoutShorterForm(t *testing.T) {
+	entities := []models.CandidateEntity{
+		{Mention: "haifa central branch", CanonicalName: "haifa central branch"},
+	}
+
+	aliasMap := map[string]string{}
+	addSuffixAliasRules(entities, aliasMap)
+
+	if _, ok := aliasMap["haifa central branch"]; ok {
+		t.Error("should not merge when shorter form does not exist")
+	}
+}
+
+// --- Backup upgrade test ---
+
+func TestAnnotateConditionalEdges_UpgradesConditionalToBackup(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{
+			FromMention:  "northlab",
+			RelationID:   "PROCESSES_TESTS_FOR",
+			ToMention:    "cedargate",
+			EvidenceText: "NorthLab processes tests during Al-Amal downtime.",
+			Status:       "conditional", // LLM set conditional, should upgrade to backup
+		},
+	}
+
+	result := annotateConditionalEdges(edges)
+
+	if result[0].Status != "backup" {
+		t.Errorf("expected conditional to be upgraded to backup for eligible relation, got %q", result[0].Status)
+	}
+}

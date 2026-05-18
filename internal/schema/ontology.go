@@ -51,6 +51,8 @@ var PredefinedFunctionalRoles = []string{
 	"service_provider",    // entity that provides services
 	"headquarters",        // entity serving as HQ location
 	"regional_hub",        // entity serving as regional center
+	"medical_courier",     // entity that transports medical samples/supplies
+	"transport_provider",  // entity providing logistics/delivery services
 }
 
 // FunctionalRoleSet is a lookup set for fast validation.
@@ -157,6 +159,9 @@ func init() {
 		},
 		"PLANNED_SERVICE": {
 			SourceRoles: []string{"planned_unit", "branch", "operated_unit"},
+		},
+		"TRANSPORTS_SAMPLES_FOR": {
+			SourceRoles: []string{"medical_courier", "transport_provider"},
 		},
 	}
 }
