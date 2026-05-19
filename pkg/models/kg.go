@@ -24,6 +24,7 @@ type KGEdge struct {
 	ChunkIDs   []string      `json:"chunk_ids"`
 	Status     string        `json:"status,omitempty"`    // active, planned, backup, conditional
 	Condition  string        `json:"condition,omitempty"` // conditional context
+	Temporal   map[string]string `json:"temporal,omitempty"`
 }
 
 // LangText is a text string with its language.
@@ -75,6 +76,7 @@ type CandidateEdge struct {
 	AlternativeGroup  string  `json:"alternative_group,omitempty"`
 	Status            string  `json:"status,omitempty"`    // active, planned, backup, conditional
 	Condition         string  `json:"condition,omitempty"` // conditional context (e.g., "during Al-Amal downtime")
+	Temporal          map[string]string `json:"temporal,omitempty"`
 }
 
 // CandidateGraph holds all extraction output before canonicalization and solving.
@@ -94,6 +96,7 @@ type CanonicalEntity struct {
 	Labels          map[string]string `json:"labels,omitempty"`
 	Aliases         []LangText        `json:"aliases,omitempty"`
 	Evidence        []EvidenceRef     `json:"evidence"`
+	Properties      map[string]interface{} `json:"properties,omitempty"`
 }
 
 // HasRole checks if an entity has a specific functional role.

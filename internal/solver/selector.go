@@ -225,6 +225,7 @@ func buildFinal(edges []models.CandidateEdge, entities map[string]*models.Canoni
 		}
 		kgEdge.Status = e.Status
 		kgEdge.Condition = e.Condition
+		kgEdge.Temporal = e.Temporal
 		fg.Edges = append(fg.Edges, kgEdge)
 	}
 
@@ -242,6 +243,7 @@ func buildFinal(edges []models.CandidateEdge, entities map[string]*models.Canoni
 			kgEnt.Status = ent.Status
 			kgEnt.Labels = ent.Labels
 			kgEnt.Aliases = ent.Aliases
+			kgEnt.Properties = ent.Properties
 		}
 		fg.Entities = append(fg.Entities, kgEnt)
 	}

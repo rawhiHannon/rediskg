@@ -83,6 +83,7 @@ func (p *Pipeline) Query(question string) (*models.QueryResult, error) {
 // Uses a two-phase approach: substring matching first, then vector similarity as fallback.
 func (p *Pipeline) findRelevantEntities(question string) []string {
 	q := strings.ToLower(question)
+	q = p.rewriteQueryWithAliases(q)
 
 	// Get all node names
 	nodes, err := p.store.GetAllNodes()
@@ -150,6 +151,36 @@ func (p *Pipeline) findRelevantEntities(question string) []string {
 	}
 
 	return unique
+}
+
+func (p *Pipeline) rewriteQueryWithAliases(question string) string {
+	cypher := `MATCH (a:Concept)-[r:ALIAS_OF]->(c:Concept) RETURN a.name, c.name LIMIT 500`
+	res, err := p.store.ROQuery(cypher)
+	if err != nil {
+		return question
+	}
+	rewritten := question
+	if arr, ok := res.([]interface{}); ok && len(arr) >= 2 {
+		if rows, ok := arr[1].([]interface{}); ok {
+			for _, row := range rows {
+				cols, ok := row.([]interface{})
+				if !ok || len(cols) < 2 {
+					continue
+				}
+				alias, _ := cols[0].(string)
+				canonical, _ := cols[1].(string)
+				alias = strings.ToLower(strings.TrimSpace(alias))
+				canonical = strings.ToLower(strings.TrimSpace(canonical))
+				if alias == "" || canonical == "" {
+					continue
+				}
+				if strings.Contains(rewritten, alias) {
+					rewritten = strings.ReplaceAll(rewritten, alias, canonical)
+				}
+			}
+		}
+	}
+	return rewritten
 }
 
 // fetchEntityFacts runs deterministic Cypher queries to get all facts about an entity.

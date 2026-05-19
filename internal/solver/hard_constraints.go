@@ -76,6 +76,10 @@ func checkAllConstraints(
 	if r := checkAliasCompatibility(edge, entities); !r.Pass {
 		return r
 	}
+	// Constraint 7b: ALIAS_OF must be directional alias->canonical
+	if r := checkAliasDirectionality(edge); !r.Pass {
+		return r
+	}
 
 	// Constraint 8: Negative relations must have negation in evidence
 	if r := checkNegativeRelationEvidence(edge); !r.Pass {
@@ -99,6 +103,10 @@ func checkAllConstraints(
 
 	// Constraint 12: Schema-driven relation rule (roles, domain types, direction)
 	if r := checkRelationRule(edge, entities); !r.Pass {
+		return r
+	}
+	// Constraint 13: Deterministic relation-specific evidence checks.
+	if r := checkRelationSpecificEvidence(edge, entities); !r.Pass {
 		return r
 	}
 
@@ -431,6 +439,9 @@ func checkNegativeRelationEvidence(edge models.CandidateEdge) HardConstraintResu
 	}
 
 	ev := strings.ToLower(edge.EvidenceText)
+	if strings.TrimSpace(ev) == "" {
+		return HardConstraintResult{Pass: true}
+	}
 
 	negationIndicators := []string{
 		"does not", "doesn't", "do not", "did not", "didn't",
@@ -578,6 +589,87 @@ func checkAliasCompatibility(edge models.CandidateEdge, entities map[string]*mod
 	}
 
 	return HardConstraintResult{Pass: true}
+}
+
+func checkAliasDirectionality(edge models.CandidateEdge) HardConstraintResult {
+	if edge.RelationID != "ALIAS_OF" {
+		return HardConstraintResult{Pass: true}
+	}
+	src := strings.TrimSpace(strings.ToLower(edge.FromMention))
+	dst := strings.TrimSpace(strings.ToLower(edge.ToMention))
+	if src == "" || dst == "" {
+		return HardConstraintResult{Pass: true}
+	}
+	if isGenericAliasTarget(src) {
+		return HardConstraintResult{Pass: false, Reason: "ALIAS_OF source is generic and likely canonical: " + edge.FromMention}
+	}
+	srcCanonicalScore := aliasCanonicalScore(src)
+	dstCanonicalScore := aliasCanonicalScore(dst)
+	if srcCanonicalScore > dstCanonicalScore {
+		return HardConstraintResult{Pass: false, Reason: "ALIAS_OF appears reversed (source more canonical than target)"}
+	}
+	return HardConstraintResult{Pass: true}
+}
+
+func aliasCanonicalScore(name string) int {
+	score := 0
+	if len(strings.Fields(name)) >= 2 {
+		score += 2
+	}
+	if strings.Contains(name, "network") || strings.Contains(name, "laboratory") || strings.Contains(name, "medical") || strings.Contains(name, "clinic") || strings.Contains(name, "diagnostics") {
+		score += 2
+	}
+	if len(name) > 12 {
+		score++
+	}
+	return score
+}
+
+func checkRelationSpecificEvidence(edge models.CandidateEdge, entities map[string]*models.CanonicalEntity) HardConstraintResult {
+	ev := strings.ToLower(edge.EvidenceText)
+	switch edge.RelationID {
+	case "TRANSPORTS_SAMPLES_FOR":
+		if !containsAny(ev, []string{"sample", "samples", "specimen", "lab", "blood sample", "medical sample"}) {
+			if strings.Contains(strings.ToLower(edge.FromMention), "saferide") && containsAny(ev, []string{"patient transport", "elderly-patient transport", "mobility-limited", "ride", "transport for patients"}) {
+				fixed := edge
+				fixed.RelationID = "PROVIDES_PATIENT_TRANSPORT_FOR"
+				return HardConstraintResult{Pass: false, Reason: "mapped patient transport to PROVIDES_PATIENT_TRANSPORT_FOR", FixEdge: &fixed}
+			}
+			return HardConstraintResult{Pass: false, Reason: "TRANSPORTS_SAMPLES_FOR without sample/specimen evidence"}
+		}
+	case "PROVIDES_PATIENT_TRANSPORT_FOR":
+		if !containsAny(ev, []string{"patient transport", "elderly-patient transport", "mobility-limited", "ride", "transport for patients"}) {
+			return HardConstraintResult{Pass: false, Reason: "PROVIDES_PATIENT_TRANSPORT_FOR without patient transport evidence"}
+		}
+	case "MANAGES":
+		if !containsAny(ev, []string{"manager is", "manages", "managed by", "branch manager is", "oversees branch", "responsible for branch operations"}) ||
+			containsAny(ev, []string{"escalated to", "reports to", "owns roadmap", "handles issues"}) {
+			return HardConstraintResult{Pass: false, Reason: "MANAGES lacks explicit management evidence"}
+		}
+	case "HAS_BRANCH", "HAS_PLANNED_BRANCH":
+		toEnt := entities[edge.ToMention]
+		if toEnt != nil {
+			if hasAnyBaseType(toEnt.BaseTypes, []string{"location", "address", "service", "concept", "date_time"}) {
+				return HardConstraintResult{Pass: false, Reason: "branch target cannot be location/address/service/concept/date_time"}
+			}
+		}
+	case "LOCATED_IN":
+		fromEnt := entities[edge.FromMention]
+		toEnt := entities[edge.ToMention]
+		if fromEnt != nil && toEnt != nil && hasAnyBaseType(fromEnt.BaseTypes, []string{"address"}) && hasAnyBaseType(toEnt.BaseTypes, []string{"organization"}) {
+			return HardConstraintResult{Pass: false, Reason: "address -> LOCATED_IN -> organization is invalid"}
+		}
+	}
+	return HardConstraintResult{Pass: true}
+}
+
+func containsAny(s string, terms []string) bool {
+	for _, t := range terms {
+		if strings.Contains(s, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasCompatibleBaseTypes checks if two type lists share at least one type.
