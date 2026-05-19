@@ -176,6 +176,17 @@ func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 	if conditionStr != "" {
 		extraCreate += fmt.Sprintf(", r.condition = '%s'", conditionStr)
 	}
+	for k, v := range record.Temporal {
+		key := sanitizePropertyKey(k)
+		if key == "" {
+			continue
+		}
+		val := escapeCypher(strings.TrimSpace(v))
+		if val == "" {
+			continue
+		}
+		extraCreate += fmt.Sprintf(", r.%s = '%s'", key, val)
+	}
 
 	// Build optional ON MATCH SET clauses for evidence, status, condition
 	extraMatch := ""
@@ -187,6 +198,17 @@ func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 	}
 	if conditionStr != "" {
 		extraMatch += fmt.Sprintf(", r.condition = CASE WHEN r.condition IS NULL OR r.condition = '' THEN '%s' WHEN r.condition CONTAINS '%s' THEN r.condition ELSE r.condition + '\\n---\\n' + '%s' END", conditionStr, conditionStr, conditionStr)
+	}
+	for k, v := range record.Temporal {
+		key := sanitizePropertyKey(k)
+		if key == "" {
+			continue
+		}
+		val := escapeCypher(strings.TrimSpace(v))
+		if val == "" {
+			continue
+		}
+		extraMatch += fmt.Sprintf(", r.%s = CASE WHEN r.%s IS NULL OR r.%s = '' THEN '%s' ELSE r.%s END", key, key, key, val, key)
 	}
 
 	cypher := fmt.Sprintf(
