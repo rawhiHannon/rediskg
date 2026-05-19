@@ -141,9 +141,9 @@ func (s *Server) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Get edges between all visible nodes
+		// Get edges along every 1-2 hop path so 2nd-hop nodes stay connected.
 		edgeResult, err := s.store.ROQuery(fmt.Sprintf(
-			`MATCH (n {name: '%s'})-[r]-(m) WHERE m.name IS NOT NULL RETURN n.name, type(r), m.name, r.weight`,
+			`MATCH p = (n {name: '%s'})-[*1..2]-(m) UNWIND relationships(p) AS r RETURN DISTINCT startNode(r).name, type(r), endNode(r).name, r.weight`,
 			escapeCypherParam(nodeName),
 		))
 		if err == nil {
@@ -449,85 +449,15 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build subgraph for matched entities so the UI can render it directly
-	type VisNode struct {
-		ID    string `json:"id"`
-		Label string `json:"label"`
-		Group string `json:"group,omitempty"`
-	}
-	type QueryResponse struct {
-		Answer   string                   `json:"answer"`
-		Entities []map[string]interface{} `json:"entities"`
-		Cypher   string                   `json:"cypher"`
-		Graph    struct {
-			Nodes []VisNode `json:"nodes"`
-			Edges []visEdge `json:"edges"`
-		} `json:"graph"`
-	}
-
-	resp := QueryResponse{
-		Answer:   result.Answer,
-		Entities: result.Entities,
-		Cypher:   result.Cypher,
-	}
-	resp.Graph.Nodes = []VisNode{}
-	resp.Graph.Edges = []visEdge{}
-
-	// Fetch subgraph for each matched entity
-	seen := map[string]bool{}
-	for _, em := range result.Entities {
-		name, _ := em["name"].(string)
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-
-		// Add center node
-		resp.Graph.Nodes = append(resp.Graph.Nodes, VisNode{ID: name, Label: name, Group: "focus"})
-
-		// Get neighbors
-		neighborResult, err := s.store.ROQuery(fmt.Sprintf(
-			`MATCH (n {name: '%s'})-[r*1..2]-(m) RETURN DISTINCT m.name, labels(m), m.type LIMIT 50`,
-			escapeCypherParam(name),
-		))
-		if err == nil {
-			if arr, ok := neighborResult.([]interface{}); ok && len(arr) >= 2 {
-				if rows, ok := arr[1].([]interface{}); ok {
-					for _, row := range rows {
-						if cols, ok := row.([]interface{}); ok && len(cols) > 0 {
-							mname, _ := cols[0].(string)
-							if mname == "" || seen[mname] {
-								continue
-							}
-							seen[mname] = true
-							group := ""
-							if len(cols) >= 3 {
-								if t, ok := cols[2].(string); ok {
-									group = t
-								}
-							}
-							resp.Graph.Nodes = append(resp.Graph.Nodes, VisNode{ID: mname, Label: mname, Group: group})
-						}
-					}
-				}
-			}
-		}
-
-		// Get edges
-		edgeResult, err := s.store.ROQuery(fmt.Sprintf(
-			`MATCH (n {name: '%s'})-[r]-(m) WHERE m.name IS NOT NULL RETURN n.name, type(r), m.name, r.weight`,
-			escapeCypherParam(name),
-		))
-		if err == nil {
-			for _, e := range parseVisEdges(edgeResult) {
-				if seen[e.From] && seen[e.To] {
-					resp.Graph.Edges = append(resp.Graph.Edges, e)
-				}
-			}
-		}
-	}
-
-	writeJSON(w, http.StatusOK, resp)
+	// Two primary fields: "answer" (human response) and "graph" (the focused
+	// subgraph the answer was derived from). The pipeline builds the subgraph
+	// from the same neighborhood it fed to the LLM, so they stay consistent.
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"answer":   result.Answer,
+		"graph":    result.Graph,
+		"entities": result.Entities,
+		"cypher":   result.Cypher,
+	})
 }
 
 func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {

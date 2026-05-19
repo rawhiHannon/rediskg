@@ -96,10 +96,36 @@ type EntityTypeInfo struct {
 	DomainType string // domain-specific subtype (branch_office, service_center, etc.)
 }
 
+// GraphNode is a node in a focused subgraph returned to the UI.
+type GraphNode struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Type  string `json:"type,omitempty"`
+	Focus bool   `json:"focus,omitempty"` // true if this node directly answered the question
+}
+
+// GraphEdge is an edge in a focused subgraph returned to the UI.
+type GraphEdge struct {
+	From   string  `json:"from"`
+	To     string  `json:"to"`
+	Label  string  `json:"label"`
+	Weight float64 `json:"weight,omitempty"`
+}
+
+// SubGraph is the focused neighborhood behind a query answer, for UI rendering.
+type SubGraph struct {
+	Nodes []GraphNode `json:"nodes"`
+	Edges []GraphEdge `json:"edges"`
+}
+
 // QueryResult holds the response to a natural language query.
+// The two primary fields are Answer (human-readable response) and Graph
+// (the focused subgraph the answer was derived from, for UI rendering).
 type QueryResult struct {
-	Answer   string                   `json:"answer"`
-	Entities []map[string]interface{} `json:"entities"`
-	Edges    []map[string]interface{} `json:"edges"`
-	Cypher   string                   `json:"cypher"`
+	Answer string   `json:"answer"`
+	Graph  SubGraph `json:"graph"`
+
+	// Secondary/debug fields.
+	Entities []map[string]interface{} `json:"entities,omitempty"`
+	Cypher   string                   `json:"cypher,omitempty"`
 }

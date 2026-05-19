@@ -66,6 +66,7 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	log.Println("[3/14] Grouping aliases...")
 	aliasMap := buildAliasMap(candidateGraph.Entities)
 	addSuffixAliasRules(candidateGraph.Entities, aliasMap)
+	addServiceCanonRules(candidateGraph.Entities, aliasMap)
 	log.Printf("  Found %d alias mappings", len(aliasMap))
 
 	// Phase 4: Select canonical entities (merge duplicates, pick best types)
@@ -104,6 +105,13 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	candidateGraph.Edges = rewriteStatusAwareEdges(candidateGraph.Edges, canonicalEntities)
 	log.Printf("  Status rewriting: %d -> %d edges", preRewrite, len(candidateGraph.Edges))
 
+	// Phase 9b: Deterministic HAS_BRANCH completion for known networks
+	preBranch := len(candidateGraph.Edges)
+	candidateGraph.Edges = completeBranchEdges(candidateGraph.Edges, canonicalEntities)
+	if len(candidateGraph.Edges) != preBranch {
+		log.Printf("  Branch completion: %d -> %d edges", preBranch, len(candidateGraph.Edges))
+	}
+
 	// Phase 10: Build alternative/conflict groups
 	log.Println("[10/14] Building alternative groups...")
 	candidateGraph.Edges = solver.BuildAlternativeGroups(candidateGraph.Edges)
@@ -135,9 +143,13 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	log.Printf("  Conflict resolution: %d -> %d edges", preConflict, len(finalGraph.Edges))
 	propagateAddressStatuses(finalGraph)
 
+	// Phase 14b: Deterministic temporal extraction from evidence
+	log.Println("Extracting temporal facts from evidence...")
+	extractTemporalFacts(finalGraph)
+
 	// Materialize final KG
 	log.Println("Materializing to FalkorDB...")
-	if err := p.materializeFinalGraph(finalGraph); err != nil {
+	if err := p.materializeFinalGraph(finalGraph, aliasMap); err != nil {
 		return fmt.Errorf("materialization failed: %w", err)
 	}
 
@@ -445,8 +457,12 @@ func normalizeRelations(edges []models.CandidateEdge) []models.CandidateEdge {
 }
 
 // materializeFinalGraph writes the final graph to FalkorDB.
-func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
+func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph, aliasMap map[string]string) error {
 	// Store entities
+	entitySet := make(map[string]bool, len(fg.Entities))
+	for _, ent := range fg.Entities {
+		entitySet[strings.ToLower(strings.TrimSpace(ent.CanonicalName))] = true
+	}
 	for _, ent := range fg.Entities {
 		entity := models.Entity{
 			Name:       ent.CanonicalName,
@@ -509,6 +525,53 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 			log.Printf("Warning: failed to store edge %s -[%s]-> %s: %v",
 				edge.From, edge.RelationID, edge.To, err)
 		}
+	}
+
+	// Materialize ALIAS_OF edges from the alias map so the query layer
+	// (rewriteQueryWithAliases) can resolve user phrasings to canonical
+	// entities. Aliases otherwise collapse to self-loops and are dropped.
+	resolveAlias := func(n string) string {
+		seen := map[string]bool{}
+		for {
+			next, ok := aliasMap[n]
+			if !ok || next == n || seen[n] {
+				return n
+			}
+			seen[n] = true
+			n = strings.ToLower(strings.TrimSpace(next))
+		}
+	}
+	aliasEdges := 0
+	for alias := range aliasMap {
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		canonical := resolveAlias(alias)
+		if alias == "" || canonical == "" || alias == canonical {
+			continue
+		}
+		// Canonical must be a real materialized entity.
+		if !entitySet[canonical] {
+			continue
+		}
+		// Don't demote a materialized entity into an alias node.
+		if entitySet[alias] {
+			continue
+		}
+		rec := models.EdgeRecord{
+			Node1:     alias,
+			Node1Type: "alias",
+			Node2:     canonical,
+			Edge:      "ALIAS_OF",
+			Weight:    1.0,
+			Status:    "active",
+		}
+		if err := p.store.CreateEdge(rec); err != nil {
+			log.Printf("Warning: failed to store alias edge %s -[ALIAS_OF]-> %s: %v", alias, canonical, err)
+			continue
+		}
+		aliasEdges++
+	}
+	if aliasEdges > 0 {
+		log.Printf("  Materialized %d ALIAS_OF edges", aliasEdges)
 	}
 
 	return nil

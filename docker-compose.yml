@@ -1,0 +1,14 @@
+# Runs ONLY Redis 8 + the FalkorDB module in a glibc-2.39 container.
+# The rediskg Go binary stays on the host (Ubuntu 20) and connects here.
+services:
+  falkordb:
+    build: .
+    container_name: rediskg-falkordb
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "GRAPH.QUERY", "__hc__", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
