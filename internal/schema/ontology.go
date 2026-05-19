@@ -136,11 +136,13 @@ func init() {
 		"HAS_BRANCH": {
 			SourceRoles:             []string{"parent_organization", "operator"},
 			TargetRoles:             []string{"branch", "operated_unit"},
+			TargetDomainTypes:       []string{"branch_office", "clinic", "care_center", "wellness_hub", "service_center"},
 			ForbiddenTargetStatuses: []string{"planned"},
 		},
 		"HAS_PLANNED_BRANCH": {
 			SourceRoles: []string{"parent_organization", "operator"},
 			TargetRoles: []string{"branch", "operated_unit", "planned_unit"},
+			TargetDomainTypes: []string{"branch_office", "clinic", "care_center", "wellness_hub", "service_center"},
 		},
 		"MANAGES": {
 			SourceRoles: []string{"staff_member"},
@@ -179,6 +181,9 @@ func init() {
 				"laboratory", "diagnostics_lab", "lab",
 				"pharmacy", "insurance_services", "imaging_provider",
 			},
+		},
+		"PROVIDES_PATIENT_TRANSPORT_FOR": {
+			SourceRoles: []string{"transport_provider"},
 		},
 		"PROCESSES_TESTS_FOR": {
 			SourceDomainTypes: []string{"laboratory", "diagnostics_lab", "lab"},
@@ -239,8 +244,8 @@ var PredefinedRelations = []RelationFamily{
 	{
 		Category: "STRUCTURE",
 		Relations: []RelationDef{
-			{ID: "HAS_BRANCH", Description: "Organization has an active branch/site", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization", "location"}},
-			{ID: "HAS_PLANNED_BRANCH", Description: "Organization has a planned/future branch", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization", "location"}},
+			{ID: "HAS_BRANCH", Description: "Organization has an active branch/site", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
+			{ID: "HAS_PLANNED_BRANCH", Description: "Organization has a planned/future branch", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
 			{ID: "PART_OF", Description: "Entity is part of a larger entity", SourceTypes: []string{"organization", "location"}, TargetTypes: []string{"organization", "location"}},
 			{ID: "HEADQUARTERED_AT", Description: "Organization headquarters location", SourceTypes: []string{"organization"}, TargetTypes: []string{"location", "address"}},
 		},
@@ -248,8 +253,8 @@ var PredefinedRelations = []RelationFamily{
 	{
 		Category: "LOCATION",
 		Relations: []RelationDef{
-			{ID: "LOCATED_AT", Description: "Entity is at a specific address", TargetTypes: []string{"address", "location"}},
-			{ID: "LOCATED_IN", Description: "Entity is within a geographic area", TargetTypes: []string{"location"}},
+			{ID: "LOCATED_AT", Description: "Entity is at a specific address", SourceTypes: []string{"organization", "person", "physical_object", "technology", "event"}, TargetTypes: []string{"address", "location"}},
+			{ID: "LOCATED_IN", Description: "Entity is within a geographic area", SourceTypes: []string{"organization", "address", "location", "event"}, TargetTypes: []string{"location"}},
 			{ID: "NEAR", Description: "Entity is near another entity", Symmetric: true},
 		},
 	},
@@ -288,6 +293,7 @@ var PredefinedRelations = []RelationFamily{
 			{ID: "PROCESSES_TESTS_FOR", Description: "Partner processes lab tests for organization", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
 			{ID: "PROCESSES_CORPORATE_PANELS_FOR", Description: "Partner handles corporate screening for org", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
 			{ID: "TRANSPORTS_SAMPLES_FOR", Description: "Partner transports samples for organization", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
+			{ID: "PROVIDES_PATIENT_TRANSPORT_FOR", Description: "Partner provides patient transportation for organization", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
 			{ID: "HANDLES_BILLING_FOR", Description: "Partner handles billing for organization", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}},
 			{ID: "CONTRACTED_WITH", Description: "Entity has a contract with another", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}, Symmetric: true},
 			{ID: "HAS_AGREEMENT_WITH", Description: "Entity has agreement with another", SourceTypes: []string{"organization"}, TargetTypes: []string{"organization"}, Symmetric: true},
@@ -323,7 +329,7 @@ var PredefinedRelations = []RelationFamily{
 	{
 		Category: "IDENTITY",
 		Relations: []RelationDef{
-			{ID: "ALIAS_OF", Description: "Entity is an alias of another (internal use only)", Symmetric: true},
+			{ID: "ALIAS_OF", Description: "Entity is an alias of another (internal use only)"},
 		},
 	},
 }

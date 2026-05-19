@@ -33,6 +33,8 @@ IMPORTANT RULES:
 10. NEGATIVE FACTS: When text says "X does NOT work at Y", "X no longer at Y", "does not offer Z", "does not handle billing/claims/reimbursement for X", extract the negative relation. Use: DOES_NOT_WORK_AT, DOES_NOT_OFFER, NO_CONTRACT_WITH, DOES_NOT_HANDLE_BILLING_FOR, DOES_NOT_HANDLE_CLAIMS_FOR, DOES_NOT_HANDLE_REIMBURSEMENT_FOR, DOES_NOT_PROCESS_TESTS_FOR. Do NOT convert negations into positive relations.
 11. BRANCH TYPING: Branch offices, subsidiaries, and operational sites of an organization are base_type "organization", NOT "location". Only use "location" for pure geographic places (cities, countries, neighborhoods).
 12. PLANNED vs ACTIVE: If an entity is described as planned, upcoming, or future, set status to "planned" and use PLANNED_SERVICE (not OFFERS) for its services. Add functional_role "planned_unit".
+13. ALIAS EXTRACTION: Explicitly extract aliases from patterns like "X may be written as A, B, or C", "X is often shortened to Y", "internal aliases include A, B, C", "X may appear as A or B". Put aliases in entity.aliases and emit ALIAS_OF edges as alias -> canonical entity.
+14. TEMPORAL FACTS: Do not create standalone date entities unless relation explicitly requires date_time. Put temporal values under edge.temporal fields when applicable: opened_on, start_date, end_date, valid_through, occurred_on, expected_opening, schedule.
 
 ## PREDEFINED BASE TYPES (you MUST use these):
 %s
@@ -82,6 +84,10 @@ IMPORTANT RULES:
       "confidence": 0.85,
       "status": "active | planned | backup | conditional | historical | unknown",
       "condition": "empty string unless the fact depends on if/when/during/unless — then describe the condition"
+      "temporal": {
+        "opened_on": "2024-05-19",
+        "start_date": "2021-02-01"
+      }
     }
   ]
 }`, baseTypes, roles, statuses, relations)
@@ -126,6 +132,7 @@ func ExtractWithSchema(client *Client, text string, chunkID string) ([]models.Ca
 			Confidence       float64 `json:"confidence"`
 			Status           string  `json:"status"`
 			Condition        string  `json:"condition"`
+			Temporal         map[string]string `json:"temporal"`
 		} `json:"edges"`
 	}
 
@@ -228,6 +235,7 @@ func ExtractWithSchema(client *Client, text string, chunkID string) ([]models.Ca
 			EvidenceScore:  e.Confidence,
 			SchemaFitScore: schemaFit,
 			Confidence:     e.Confidence,
+			Temporal:       e.Temporal,
 		}
 
 		// Parse edge status

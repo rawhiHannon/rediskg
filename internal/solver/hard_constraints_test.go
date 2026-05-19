@@ -184,6 +184,33 @@ func TestCheckAliasCompatibility_AllowsCompatible(t *testing.T) {
 	}
 }
 
+func TestCheckAliasDirectionality_RejectsCanonicalToAlias(t *testing.T) {
+	entities := map[string]*models.CanonicalEntity{
+		"cedargate health network": {CanonicalName: "cedargate health network", BaseTypes: []string{"organization"}},
+		"cedargate":                {CanonicalName: "cedargate", BaseTypes: []string{"organization"}},
+	}
+	edges := []models.CandidateEdge{{FromMention: "cedargate health network", RelationID: "ALIAS_OF", ToMention: "cedargate"}}
+	result := ApplyHardConstraints(edges, entities, map[string]string{})
+	if len(result) != 0 {
+		t.Error("canonical -> alias ALIAS_OF should be rejected")
+	}
+}
+
+func TestCheckRelationSpecificEvidence_MapsSafeRideToPatientTransport(t *testing.T) {
+	entities := map[string]*models.CanonicalEntity{
+		"saferide medical transport":   {CanonicalName: "saferide medical transport", BaseTypes: []string{"organization"}, FunctionalRoles: []string{"transport_provider"}},
+		"cedargate nazareth care center": {CanonicalName: "cedargate nazareth care center", BaseTypes: []string{"organization"}},
+	}
+	edges := []models.CandidateEdge{{
+		FromMention: "saferide medical transport", RelationID: "TRANSPORTS_SAMPLES_FOR", ToMention: "cedargate nazareth care center",
+		EvidenceText: "SafeRide provides elderly-patient transport for mobility-limited patients.",
+	}}
+	result := ApplyHardConstraints(edges, entities, map[string]string{})
+	if len(result) != 1 || result[0].RelationID != "PROVIDES_PATIENT_TRANSPORT_FOR" {
+		t.Error("expected SafeRide edge to map to PROVIDES_PATIENT_TRANSPORT_FOR")
+	}
+}
+
 // --- Negative relation evidence tests ---
 
 func TestCheckNegativeRelationEvidence_RejectsWithoutNegation(t *testing.T) {
@@ -399,7 +426,10 @@ func TestCheckRelationDirection_AllowsCourierTransportsSamples(t *testing.T) {
 	}
 
 	edges := []models.CandidateEdge{
-		{FromMention: "quickcourier medical", RelationID: "TRANSPORTS_SAMPLES_FOR", ToMention: "cedargate haifa"},
+		{
+			FromMention: "quickcourier medical", RelationID: "TRANSPORTS_SAMPLES_FOR", ToMention: "cedargate haifa",
+			EvidenceText: "QuickCourier handles medical sample transport for CedarGate Haifa.",
+		},
 	}
 
 	result := ApplyHardConstraints(edges, entities, map[string]string{})

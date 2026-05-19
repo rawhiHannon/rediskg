@@ -49,6 +49,33 @@ func TestBuildAliasMap_CaseNormalization(t *testing.T) {
 	}
 }
 
+func TestBuildAliasEdges(t *testing.T) {
+	aliasMap := map[string]string{
+		"qcm": "quickcourier medical",
+	}
+	edges := buildAliasEdges(aliasMap)
+	if len(edges) != 1 {
+		t.Fatalf("expected 1 alias edge, got %d", len(edges))
+	}
+	if edges[0].RelationID != "ALIAS_OF" || edges[0].FromMention != "qcm" || edges[0].ToMention != "quickcourier medical" {
+		t.Fatalf("unexpected alias edge: %#v", edges[0])
+	}
+}
+
+func TestInferTemporalFromEvidence(t *testing.T) {
+	edges := []models.CandidateEdge{
+		{RelationID: "HAS_BRANCH", EvidenceText: "Opened on 2024-05-19."},
+		{RelationID: "CONTRACTED_WITH", EvidenceText: "Valid 2021-02-01 through 2026-06-30."},
+	}
+	out := inferTemporalFromEvidence(edges)
+	if out[0].Temporal["opened_on"] != "2024-05-19" {
+		t.Fatalf("expected opened_on date, got %#v", out[0].Temporal)
+	}
+	if out[1].Temporal["start_date"] != "2021-02-01" || out[1].Temporal["valid_through"] != "2026-06-30" {
+		t.Fatalf("expected contract dates, got %#v", out[1].Temporal)
+	}
+}
+
 // --- Canonical entity selection tests ---
 
 func TestSelectCanonicalEntities_MergesDuplicates(t *testing.T) {

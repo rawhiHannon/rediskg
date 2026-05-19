@@ -78,6 +78,7 @@ type EdgeRecord struct {
 	Evidence  string   // source text supporting this edge
 	Condition string   // conditional context (e.g., "during downtime")
 	Status    string   // edge status: active, backup, planned, conditional
+	Temporal  map[string]string
 }
 
 // Community represents a detected community/cluster of nodes.

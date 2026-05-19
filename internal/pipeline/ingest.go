@@ -78,10 +78,13 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 
 	// Phase 4c: Fix event entity statuses (incidents != planned)
 	fixEntityStatuses(canonicalEntities)
+	canonicalizeServiceEntities(canonicalEntities)
+	applyAliasProperties(canonicalEntities, aliasMap)
 
 	// Phase 5: Rewrite all edges to canonical entity names
 	log.Println("[5/14] Rewriting edges to canonical entities...")
 	candidateGraph.Edges = rewriteEdgesToCanonical(candidateGraph.Edges, aliasMap)
+	candidateGraph.Edges = append(candidateGraph.Edges, buildAliasEdges(aliasMap)...)
 
 	// Phase 6: Normalize relation names to stable internal IDs
 	log.Println("[6/14] Normalizing relations...")
@@ -95,6 +98,7 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	// Phase 8: Deterministic conditional annotation (evidence-based status/condition)
 	log.Println("[8/14] Annotating conditional edges from evidence...")
 	candidateGraph.Edges = annotateConditionalEdges(candidateGraph.Edges)
+	candidateGraph.Edges = inferTemporalFromEvidence(candidateGraph.Edges)
 
 	// Phase 9: Status-aware edge rewriting
 	log.Println("[9/14] Rewriting status-aware edges...")
@@ -131,6 +135,7 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	preConflict := len(finalGraph.Edges)
 	finalGraph.Edges = resolveNegativeConflicts(finalGraph.Edges)
 	log.Printf("  Conflict resolution: %d -> %d edges", preConflict, len(finalGraph.Edges))
+	propagateAddressStatuses(finalGraph)
 
 	// Materialize final KG
 	log.Println("Materializing to FalkorDB...")
@@ -463,6 +468,23 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 		if len(ent.FunctionalRoles) > 0 {
 			entity.Properties["functional_roles"] = strings.Join(ent.FunctionalRoles, ",")
 		}
+		if len(ent.Aliases) > 0 {
+			var aliasVals []string
+			seen := map[string]bool{}
+			for _, a := range ent.Aliases {
+				v := strings.ToLower(strings.TrimSpace(a.Text))
+				if v != "" && !seen[v] {
+					seen[v] = true
+					aliasVals = append(aliasVals, v)
+				}
+			}
+			if len(aliasVals) > 0 {
+				entity.Properties["aliases"] = strings.Join(aliasVals, "|")
+			}
+		}
+		for k, v := range ent.Properties {
+			entity.Properties[k] = v
+		}
 		if err := p.store.CreateEntity(entity); err != nil {
 			log.Printf("Warning: failed to store entity '%s': %v", ent.CanonicalName, err)
 		}
@@ -483,6 +505,7 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 			Evidence:  evidence,
 			Status:    edge.Status,
 			Condition: edge.Condition,
+			Temporal:  edge.Temporal,
 		}
 		if err := p.store.CreateEdge(edgeRecord); err != nil {
 			log.Printf("Warning: failed to store edge %s -[%s]-> %s: %v",
@@ -491,6 +514,141 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph) error {
 	}
 
 	return nil
+}
+
+func applyAliasProperties(entities map[string]*models.CanonicalEntity, aliasMap map[string]string) {
+	for alias, canonical := range aliasMap {
+		ent := entities[canonical]
+		if ent == nil {
+			continue
+		}
+		exists := false
+		for _, a := range ent.Aliases {
+			if strings.EqualFold(strings.TrimSpace(a.Text), alias) {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			ent.Aliases = append(ent.Aliases, models.LangText{Text: alias, Lang: "und"})
+		}
+	}
+}
+
+func canonicalizeServiceEntities(entities map[string]*models.CanonicalEntity) {
+	for name, ent := range entities {
+		if !hasBaseType(ent.BaseTypes, "service") {
+			continue
+		}
+		n := strings.ToLower(strings.TrimSpace(name))
+		if n == "blood test" {
+			delete(entities, name)
+			if target, ok := entities["blood tests"]; ok {
+				target.Aliases = append(target.Aliases, models.LangText{Text: "blood test", Lang: "en"})
+			}
+		}
+		if n == "vaccination" {
+			delete(entities, name)
+			if target, ok := entities["vaccinations"]; ok {
+				target.Aliases = append(target.Aliases, models.LangText{Text: "vaccination", Lang: "en"})
+			}
+		}
+		if strings.Contains(n, "vaccination booking") || strings.Contains(n, "booking requirement") {
+			if ent.Properties == nil {
+				ent.Properties = map[string]interface{}{}
+			}
+			ent.Properties["service_policy"] = "booking_required"
+		}
+	}
+}
+
+func buildAliasEdges(aliasMap map[string]string) []models.CandidateEdge {
+	var edges []models.CandidateEdge
+	i := 0
+	for alias, canonical := range aliasMap {
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		canonical = strings.ToLower(strings.TrimSpace(canonical))
+		if alias == "" || canonical == "" || alias == canonical {
+			continue
+		}
+		edges = append(edges, models.CandidateEdge{
+			ID:          fmt.Sprintf("alias_%d", i),
+			FromMention: alias,
+			RelationID:  "ALIAS_OF",
+			ToMention:   canonical,
+			Confidence:  1.0,
+			Status:      "active",
+		})
+		i++
+	}
+	return edges
+}
+
+func inferTemporalFromEvidence(edges []models.CandidateEdge) []models.CandidateEdge {
+	isoDateRe := regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}\b`)
+	for i := range edges {
+		if edges[i].Temporal == nil {
+			edges[i].Temporal = map[string]string{}
+		}
+		ev := strings.ToLower(edges[i].EvidenceText)
+		matches := isoDateRe.FindAllString(ev, -1)
+		if len(matches) == 0 {
+			continue
+		}
+		switch edges[i].RelationID {
+		case "HAS_BRANCH", "HAS_PLANNED_BRANCH":
+			edges[i].Temporal["opened_on"] = matches[0]
+		case "CONTRACTED_WITH", "HAS_AGREEMENT_WITH":
+			if len(matches) >= 1 {
+				edges[i].Temporal["start_date"] = matches[0]
+			}
+			if len(matches) >= 2 {
+				edges[i].Temporal["valid_through"] = matches[1]
+			}
+		case "AFFECTS", "ESCALATED_TO", "REPORTED_BY", "NOTIFIED":
+			edges[i].Temporal["occurred_on"] = matches[0]
+		default:
+			if _, ok := edges[i].Temporal["occurred_on"]; !ok {
+				edges[i].Temporal["occurred_on"] = matches[0]
+			}
+		}
+	}
+	return edges
+}
+
+func hasBaseType(baseTypes []string, t string) bool {
+	for _, bt := range baseTypes {
+		if bt == t {
+			return true
+		}
+	}
+	return false
+}
+
+func propagateAddressStatuses(fg *models.FinalGraph) {
+	byName := map[string]*models.KGEntity{}
+	for i := range fg.Entities {
+		byName[fg.Entities[i].CanonicalName] = &fg.Entities[i]
+	}
+	for _, e := range fg.Edges {
+		if e.RelationID != "LOCATED_AT" {
+			continue
+		}
+		src := byName[e.From]
+		dst := byName[e.To]
+		if src == nil || dst == nil {
+			continue
+		}
+		if !hasBaseType(dst.BaseTypes, "address") {
+			continue
+		}
+		if src.Status == "active" && dst.Status != "active" {
+			dst.Status = "active"
+		}
+		if src.Status == "planned" && dst.Status != "active" && dst.Status != "planned" {
+			dst.Status = "planned"
+		}
+	}
 }
 
 // postSolverValidation performs final cleanup on the solved graph.
