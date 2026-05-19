@@ -426,7 +426,10 @@ func TestCheckRelationDirection_AllowsCourierTransportsSamples(t *testing.T) {
 	}
 
 	edges := []models.CandidateEdge{
-		{FromMention: "quickcourier medical", RelationID: "TRANSPORTS_SAMPLES_FOR", ToMention: "cedargate haifa"},
+		{
+			FromMention: "quickcourier medical", RelationID: "TRANSPORTS_SAMPLES_FOR", ToMention: "cedargate haifa",
+			EvidenceText: "QuickCourier handles medical sample transport for CedarGate Haifa.",
+		},
 	}
 
 	result := ApplyHardConstraints(edges, entities, map[string]string{})
