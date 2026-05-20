@@ -202,24 +202,33 @@ func (s *Server) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleExport returns the full graph as JSON (all nodes + edges, no pagination).
+//
+// Uses Cypher's properties() function for both nodes and edges so the
+// export carries every stored property (including temporal keys written
+// by extractTemporalFacts and any future additions) instead of a
+// hand-curated subset. The familiar top-level fields are still exposed
+// as named JSON keys for back-compat with the UI / existing consumers.
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	type ExportNode struct {
-		Name            string `json:"name"`
-		Type            string `json:"type,omitempty"`
-		Status          string `json:"status,omitempty"`
-		FunctionalRoles string `json:"functional_roles,omitempty"`
-		DomainType      string `json:"domain_type,omitempty"`
+		Name            string                 `json:"name"`
+		Labels          []string               `json:"labels,omitempty"`
+		Type            string                 `json:"type,omitempty"`
+		Status          string                 `json:"status,omitempty"`
+		FunctionalRoles string                 `json:"functional_roles,omitempty"`
+		DomainType      string                 `json:"domain_type,omitempty"`
+		Properties      map[string]interface{} `json:"properties,omitempty"`
 	}
 	type ExportEdge struct {
-		From        string  `json:"from"`
-		To          string  `json:"to"`
-		Relation    string  `json:"relation"`
-		Weight      float64 `json:"weight,omitempty"`
-		Description string  `json:"description,omitempty"`
-		Status      string  `json:"status,omitempty"`
-		Condition   string  `json:"condition,omitempty"`
-		Evidence    string  `json:"evidence,omitempty"`
-		ChunkIDs    string  `json:"chunk_ids,omitempty"`
+		From        string                 `json:"from"`
+		To          string                 `json:"to"`
+		Relation    string                 `json:"relation"`
+		Weight      float64                `json:"weight,omitempty"`
+		Description string                 `json:"description,omitempty"`
+		Status      string                 `json:"status,omitempty"`
+		Condition   string                 `json:"condition,omitempty"`
+		Evidence    string                 `json:"evidence,omitempty"`
+		ChunkIDs    string                 `json:"chunk_ids,omitempty"`
+		Properties  map[string]interface{} `json:"properties,omitempty"`
 	}
 	type ExportData struct {
 		Nodes []ExportNode `json:"nodes"`
@@ -228,98 +237,186 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 
 	export := ExportData{}
 
-	// Get all nodes
-	nodeResult, err := s.store.ROQuery(`MATCH (n) WHERE NOT n:__Schema__ RETURN n.name, n.type, n.status, n.functional_roles, n.domain_type ORDER BY n.name`)
+	// --- Nodes ---
+	nodeResult, err := s.store.ROQuery(`MATCH (n) WHERE NOT n:__Schema__ RETURN n.name, labels(n), properties(n) ORDER BY n.name`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if arr, ok := nodeResult.([]interface{}); ok && len(arr) >= 2 {
-		if rows, ok := arr[1].([]interface{}); ok {
-			for _, row := range rows {
-				if cols, ok := row.([]interface{}); ok && len(cols) >= 1 {
-					name, _ := cols[0].(string)
-					typ := ""
-					if len(cols) >= 2 {
-						typ, _ = cols[1].(string)
-					}
-					status, roles, domainType := "", "", ""
-					if len(cols) >= 3 {
-						status, _ = cols[2].(string)
-					}
-					if len(cols) >= 4 {
-						roles, _ = cols[3].(string)
-					}
-					if len(cols) >= 5 {
-						domainType, _ = cols[4].(string)
-					}
-					if name != "" {
-						export.Nodes = append(export.Nodes, ExportNode{
-							Name: name, Type: typ,
-							Status: status, FunctionalRoles: roles,
-							DomainType: domainType,
-						})
-					}
-				}
-			}
+	for _, row := range parseRows(nodeResult) {
+		if len(row) < 1 {
+			continue
 		}
+		name, _ := row[0].(string)
+		if name == "" {
+			continue
+		}
+		var labels []string
+		if len(row) >= 2 {
+			labels = parseStringList(row[1])
+		}
+		props := map[string]interface{}{}
+		if len(row) >= 3 {
+			props = parsePropertyMap(row[2])
+		}
+		out := ExportNode{
+			Name:            name,
+			Labels:          labels,
+			Type:            stringProp(props, "type"),
+			Status:          stringProp(props, "status"),
+			FunctionalRoles: stringProp(props, "functional_roles"),
+			DomainType:      stringProp(props, "domain_type"),
+			Properties:      stripWellKnown(props, "type", "status", "functional_roles", "domain_type", "name", "embedding"),
+		}
+		export.Nodes = append(export.Nodes, out)
 	}
 
-	// Get all edges
-	edgeResult, err := s.store.ROQuery(`MATCH (a)-[r]->(b) RETURN a.name, type(r), b.name, r.weight, r.description, r.status, r.condition, r.evidence, r.chunk_ids`)
+	// --- Edges ---
+	edgeResult, err := s.store.ROQuery(`MATCH (a)-[r]->(b) RETURN a.name, type(r), b.name, properties(r)`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if arr, ok := edgeResult.([]interface{}); ok && len(arr) >= 2 {
-		if rows, ok := arr[1].([]interface{}); ok {
-			for _, row := range rows {
-				if cols, ok := row.([]interface{}); ok && len(cols) >= 3 {
-					from, _ := cols[0].(string)
-					rel, _ := cols[1].(string)
-					to, _ := cols[2].(string)
-					weight := 0.0
-					desc := ""
-					if len(cols) >= 4 {
-						if w, ok := cols[3].(float64); ok {
-							weight = w
-						}
-					}
-					if len(cols) >= 5 {
-						desc, _ = cols[4].(string)
-					}
-					status, condition, evidence, chunkIDs := "", "", "", ""
-					if len(cols) >= 6 {
-						status, _ = cols[5].(string)
-					}
-					if len(cols) >= 7 {
-						condition, _ = cols[6].(string)
-					}
-					if len(cols) >= 8 {
-						evidence, _ = cols[7].(string)
-					}
-					if len(cols) >= 9 {
-						chunkIDs, _ = cols[8].(string)
-					}
-					if from != "" && to != "" {
-						export.Edges = append(export.Edges, ExportEdge{
-							From: from, To: to, Relation: rel,
-							Weight: weight, Description: desc,
-							Status: status, Condition: condition,
-							Evidence: evidence, ChunkIDs: chunkIDs,
-						})
-					}
-				}
-			}
+	for _, row := range parseRows(edgeResult) {
+		if len(row) < 3 {
+			continue
 		}
+		from, _ := row[0].(string)
+		rel, _ := row[1].(string)
+		to, _ := row[2].(string)
+		if from == "" || to == "" {
+			continue
+		}
+		props := map[string]interface{}{}
+		if len(row) >= 4 {
+			props = parsePropertyMap(row[3])
+		}
+		out := ExportEdge{
+			From:        from,
+			To:          to,
+			Relation:    rel,
+			Weight:      floatProp(props, "weight"),
+			Description: stringProp(props, "description"),
+			Status:      stringProp(props, "status"),
+			Condition:   stringProp(props, "condition"),
+			Evidence:    stringProp(props, "evidence"),
+			ChunkIDs:    stringProp(props, "chunk_ids"),
+			Properties:  stripWellKnown(props, "weight", "description", "status", "condition", "evidence", "chunk_ids", "embedding"),
+		}
+		export.Edges = append(export.Edges, out)
 	}
 
-	// Check if user wants a file download
 	if r.URL.Query().Get("download") == "1" {
 		w.Header().Set("Content-Disposition", "attachment; filename=knowledge_graph.json")
 	}
-
 	writeJSON(w, http.StatusOK, export)
+}
+
+// parseRows is the shared "pull the [1] rows slice out of a GRAPH.QUERY
+// reply" idiom. Returns each row as a []interface{} of column values.
+func parseRows(result interface{}) [][]interface{} {
+	arr, ok := result.([]interface{})
+	if !ok || len(arr) < 2 {
+		return nil
+	}
+	rows, ok := arr[1].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([][]interface{}, 0, len(rows))
+	for _, r := range rows {
+		if cols, ok := r.([]interface{}); ok {
+			out = append(out, cols)
+		}
+	}
+	return out
+}
+
+// parsePropertyMap converts a properties(n)/properties(r) result cell into
+// a Go map. FalkorDB returns property maps as a list of [key, value] pairs.
+func parsePropertyMap(v interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	pairs, ok := v.([]interface{})
+	if !ok {
+		return out
+	}
+	for _, pair := range pairs {
+		kv, ok := pair.([]interface{})
+		if !ok || len(kv) < 2 {
+			continue
+		}
+		key, _ := kv[0].(string)
+		if key == "" {
+			continue
+		}
+		out[key] = kv[1]
+	}
+	return out
+}
+
+// parseStringList converts a labels(n) result cell into []string.
+func parseStringList(v interface{}) []string {
+	raw, ok := v.([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// stringProp pulls a string property by key, tolerating non-string values.
+func stringProp(props map[string]interface{}, key string) string {
+	v, ok := props[key]
+	if !ok {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// floatProp pulls a numeric property as a float64.
+func floatProp(props map[string]interface{}, key string) float64 {
+	v, ok := props[key]
+	if !ok {
+		return 0
+	}
+	switch x := v.(type) {
+	case float64:
+		return x
+	case int64:
+		return float64(x)
+	}
+	return 0
+}
+
+// stripWellKnown returns a copy of props with the listed keys removed, so
+// the "everything else" Properties map doesn't repeat the named JSON fields.
+func stripWellKnown(props map[string]interface{}, keys ...string) map[string]interface{} {
+	if len(props) == 0 {
+		return nil
+	}
+	drop := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		drop[k] = true
+	}
+	out := make(map[string]interface{}, len(props))
+	for k, v := range props {
+		if drop[k] {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (s *Server) handleDeleteGraph(w http.ResponseWriter, r *http.Request) {

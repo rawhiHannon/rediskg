@@ -75,9 +75,15 @@ func areCompetingRelations(relations map[string]bool) bool {
 		"DOES_NOT_WORK_AT": true,
 	}
 
-	// Structure relations compete
+	// Structure relations that genuinely compete. HAS_BRANCH and PART_OF
+	// are NOT in this set: they're inverse expressions of the same fact
+	// (parent→branch vs branch→parent). Because the pair key above is
+	// order-independent, lumping them together previously caused the
+	// solver to drop one direction. Keeping them out of the competing
+	// set lets both survive; if the LLM only extracted one direction, the
+	// post-solver inverse-derivation step in ingest.go fills the other in.
 	structureRels := map[string]bool{
-		"HAS_BRANCH": true, "PART_OF": true, "PARTNERS_WITH": true,
+		"PARTNERS_WITH": true,
 	}
 
 	// Manager relations compete

@@ -137,7 +137,18 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	log.Printf("  Conflict resolution: %d -> %d edges", preConflict, len(finalGraph.Edges))
 	propagateAddressStatuses(finalGraph)
 
-	// Phase 14b: Deterministic temporal extraction from evidence
+	// Phase 14b: Inverse-structure derivation. HAS_BRANCH and PART_OF are
+	// inverse expressions of the same fact (parent↔branch). When the LLM
+	// only extracted one direction, fill in the other so both queries
+	// `MATCH (parent)-[:HAS_BRANCH]->()` and `MATCH ()-[:PART_OF]->(parent)`
+	// work. Runs after the solver so the synthetic edges never compete.
+	preInverse := len(finalGraph.Edges)
+	finalGraph.Edges = deriveStructureInverses(finalGraph.Edges)
+	if added := len(finalGraph.Edges) - preInverse; added > 0 {
+		log.Printf("  Derived %d inverse structure edges", added)
+	}
+
+	// Phase 14c: Deterministic temporal extraction from evidence
 	log.Println("Extracting temporal facts from evidence...")
 	extractTemporalFacts(finalGraph)
 
@@ -770,6 +781,76 @@ func rewriteStatusAwareEdges(edges []models.CandidateEdge, entities map[string]*
 
 // resolveNegativeConflicts removes positive edges when a matching negative edge exists.
 // E.g., OFFERS is removed if DOES_NOT_OFFER exists for the same (from, to) pair.
+// deriveStructureInverses fills in the inverse direction of structural
+// relations when the LLM only extracted one side. Specifically:
+//
+//   (branch)-[:PART_OF]->(parent)         ⇒ adds  (parent)-[:HAS_BRANCH]->(branch)
+//   (parent)-[:HAS_BRANCH]->(branch)      ⇒ adds  (branch)-[:PART_OF]->(parent)
+//   (planned)-[:PART_OF]->(parent)        ⇒ adds  (parent)-[:HAS_PLANNED_BRANCH]->(planned)
+//   (parent)-[:HAS_PLANNED_BRANCH]->(p)   ⇒ adds  (p)-[:PART_OF]->(parent)
+//
+// Inverses are skipped when the opposing direction already exists. New
+// edges carry the source edge's status/condition/temporal/evidence so
+// retrieval surfaces them identically to the original direction.
+func deriveStructureInverses(edges []models.KGEdge) []models.KGEdge {
+	// Index existing edges by (from, rel, to) so the inverse-emission step
+	// doesn't double-write when the LLM already produced both directions.
+	type tri struct{ from, rel, to string }
+	have := map[tri]bool{}
+	for _, e := range edges {
+		have[tri{e.From, e.RelationID, e.To}] = true
+	}
+
+	inverseOf := map[string]string{
+		"PART_OF":            "HAS_BRANCH", // default; planned branches handled below by status
+		"HAS_BRANCH":         "PART_OF",
+		"HAS_PLANNED_BRANCH": "PART_OF",
+	}
+
+	out := edges
+	for _, e := range edges {
+		inv, ok := inverseOf[e.RelationID]
+		if !ok {
+			continue
+		}
+		// PART_OF → HAS_BRANCH OR HAS_PLANNED_BRANCH depending on the
+		// branch entity's planned-ness signal carried on the edge status.
+		invRel := inv
+		var newFrom, newTo string
+		switch e.RelationID {
+		case "PART_OF":
+			// branch → parent; inverse is parent → branch
+			if e.Status == "planned" {
+				invRel = "HAS_PLANNED_BRANCH"
+			}
+			newFrom, newTo = e.To, e.From
+		case "HAS_BRANCH", "HAS_PLANNED_BRANCH":
+			// parent → branch; inverse is branch → parent (always PART_OF)
+			newFrom, newTo = e.To, e.From
+		}
+		if newFrom == "" || newTo == "" || newFrom == newTo {
+			continue
+		}
+		if have[tri{newFrom, invRel, newTo}] {
+			continue
+		}
+		have[tri{newFrom, invRel, newTo}] = true
+		inverse := models.KGEdge{
+			From:       newFrom,
+			RelationID: invRel,
+			To:         newTo,
+			Weight:     e.Weight,
+			Evidence:   e.Evidence,
+			ChunkIDs:   e.ChunkIDs,
+			Status:     e.Status,
+			Condition:  e.Condition,
+			Temporal:   e.Temporal,
+		}
+		out = append(out, inverse)
+	}
+	return out
+}
+
 func resolveNegativeConflicts(edges []models.KGEdge) []models.KGEdge {
 	// Map of negative relation -> positive relation it overrides
 	negativeOverrides := map[string]string{
