@@ -113,6 +113,10 @@ func (s *FalkorStore) CreateEntity(entity models.Entity) error {
 	return nil
 }
 
+// ToTypeLabel exposes toTypeLabel to callers in other packages (used by the
+// batched ingest writer to group entities by their PascalCase typed label).
+func ToTypeLabel(baseType string) string { return toTypeLabel(baseType) }
+
 // toTypeLabel converts a base type string to a valid Cypher label (PascalCase).
 func toTypeLabel(baseType string) string {
 	if baseType == "" {
@@ -265,6 +269,153 @@ func (s *FalkorStore) FindSimilarEntities(label, property string, embedding []fl
 	}
 
 	return parseStringResults(result), nil
+}
+
+// SetChunkEmbedding stores a vector embedding on a Chunk node, addressed by
+// the chunk's stable id (not name).
+func (s *FalkorStore) SetChunkEmbedding(chunkID string, embedding []float32) error {
+	vecStr := float32SliceToVecStr(embedding)
+	cypher := fmt.Sprintf(
+		`MATCH (c:Chunk {id: '%s'}) SET c.embedding = vecf32(%s)`,
+		escapeCypher(chunkID), vecStr,
+	)
+	_, err := s.Query(cypher)
+	return err
+}
+
+// ChunkSimilarity is one result row from FindSimilarChunks.
+type ChunkSimilarity struct {
+	ID    string
+	Text  string
+	Score float64
+}
+
+// FindSimilarChunks returns the top-k Chunk nodes by cosine similarity.
+func (s *FalkorStore) FindSimilarChunks(embedding []float32, k int) ([]ChunkSimilarity, error) {
+	vecStr := float32SliceToVecStr(embedding)
+	cypher := fmt.Sprintf(
+		`CALL db.idx.vector.queryNodes('Chunk', 'embedding', %d, vecf32(%s)) YIELD node, score RETURN node.id, node.text, score`,
+		k, vecStr,
+	)
+	result, err := s.ROQuery(cypher)
+	if err != nil {
+		return nil, err
+	}
+	var out []ChunkSimilarity
+	arr, ok := result.([]interface{})
+	if !ok || len(arr) < 2 {
+		return out, nil
+	}
+	rows, ok := arr[1].([]interface{})
+	if !ok {
+		return out, nil
+	}
+	for _, r := range rows {
+		cols, ok := r.([]interface{})
+		if !ok || len(cols) < 3 {
+			continue
+		}
+		id, _ := cols[0].(string)
+		text, _ := cols[1].(string)
+		score := 0.0
+		switch v := cols[2].(type) {
+		case float64:
+			score = v
+		case int64:
+			score = float64(v)
+		}
+		out = append(out, ChunkSimilarity{ID: id, Text: text, Score: score})
+	}
+	return out, nil
+}
+
+// CreateEdgeVectorIndex creates a vector index on a relationship property
+// for similarity search. Per-rel-type because FalkorDB scopes vector indexes
+// to a specific (type, property) pair.
+func (s *FalkorStore) CreateEdgeVectorIndex(relType, property string, dimension int) error {
+	cypher := fmt.Sprintf(
+		`CREATE VECTOR INDEX FOR ()-[r:%s]-() ON (r.%s) OPTIONS {dimension: %d, similarityFunction: 'cosine'}`,
+		relType, property, dimension,
+	)
+	_, err := s.Query(cypher)
+	return err
+}
+
+// EdgeFactSimilarity is one result row from FindSimilarEdgeFacts.
+type EdgeFactSimilarity struct {
+	From       string
+	To         string
+	RelType    string
+	Fact       string
+	Score      float64
+}
+
+// FindSimilarEdgeFacts queries the per-rel-type edge vector indexes and
+// returns the top-k matches merged across all listed relation types. FalkorDB
+// scopes vector indexes by relationship type, so we have to query each type
+// separately and merge — done with `UNION ALL` inside a single Cypher call
+// to keep the round-trip count low.
+func (s *FalkorStore) FindSimilarEdgeFacts(relTypes []string, embedding []float32, k int) ([]EdgeFactSimilarity, error) {
+	if len(relTypes) == 0 {
+		return nil, nil
+	}
+	vecStr := float32SliceToVecStr(embedding)
+	parts := make([]string, 0, len(relTypes))
+	for _, rt := range relTypes {
+		sub := fmt.Sprintf(
+			`CALL db.idx.vector.queryRelationships('%s', 'embedding', %d, vecf32(%s)) YIELD relationship, score `+
+				`MATCH (a)-[r]->(b) WHERE id(r) = id(relationship) `+
+				`RETURN a.name AS src, type(r) AS rel_type, b.name AS tgt, COALESCE(r.fact, '') AS fact, score`,
+			rt, k, vecStr,
+		)
+		parts = append(parts, sub)
+	}
+	cypher := strings.Join(parts, " UNION ")
+	result, err := s.ROQuery(cypher)
+	if err != nil {
+		return nil, err
+	}
+	var out []EdgeFactSimilarity
+	arr, ok := result.([]interface{})
+	if !ok || len(arr) < 2 {
+		return out, nil
+	}
+	rows, ok := arr[1].([]interface{})
+	if !ok {
+		return out, nil
+	}
+	for _, r := range rows {
+		cols, ok := r.([]interface{})
+		if !ok || len(cols) < 5 {
+			continue
+		}
+		src, _ := cols[0].(string)
+		rt, _ := cols[1].(string)
+		tgt, _ := cols[2].(string)
+		fact, _ := cols[3].(string)
+		score := 0.0
+		switch v := cols[4].(type) {
+		case float64:
+			score = v
+		case int64:
+			score = float64(v)
+		}
+		out = append(out, EdgeFactSimilarity{From: src, To: tgt, RelType: rt, Fact: fact, Score: score})
+	}
+	// Sort descending by score and trim to k overall.
+	sortEdgeFactsDesc(out)
+	if len(out) > k {
+		out = out[:k]
+	}
+	return out, nil
+}
+
+func sortEdgeFactsDesc(s []EdgeFactSimilarity) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j].Score > s[j-1].Score; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
 }
 
 // GetAllNodes returns all node names and types.

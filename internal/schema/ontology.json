@@ -1,0 +1,219 @@
+{
+  "base_types": [
+    {"id": "person", "description": "Named individual (doctor, student, employee, artist, etc.)"},
+    {"id": "organization", "description": "Company, institution, agency, network, group, club, charity"},
+    {"id": "location", "description": "Geographic place (country, city, neighborhood, airport, etc.)"},
+    {"id": "address", "description": "Street address or postal location"},
+    {"id": "event", "description": "Named incident, meeting, appointment, match, election, surgery"},
+    {"id": "document", "description": "Invoice, contract, report, email, policy, manual"},
+    {"id": "service", "description": "Delivery, consultation, blood test, repair, internet service"},
+    {"id": "product", "description": "Manufactured item, software subscription, insurance package"},
+    {"id": "role", "description": "Job title or function (manager, CEO, nurse, developer)"},
+    {"id": "technology", "description": "Mobile app, platform, database, AI model, API, sensor system"},
+    {"id": "physical_object", "description": "Tangible object (knife, laptop, car, medicine bottle, machine)"},
+    {"id": "biological_entity", "description": "Living organism, species, biological structure"},
+    {"id": "substance", "description": "Chemical, drug, material, compound, blood sample"},
+    {"id": "quantity", "description": "Measurable amount, metric, percentage, weight"},
+    {"id": "date_time", "description": "Date, time, duration, schedule, temporal reference"},
+    {"id": "money", "description": "Currency amount, price, salary, budget"},
+    {"id": "language", "description": "Natural language (English, Arabic, Hebrew, etc.)"},
+    {"id": "law_or_policy", "description": "Regulation, law, official policy, compliance requirement"},
+    {"id": "creative_work", "description": "Book, film, song, artwork, publication"},
+    {"id": "identifier", "description": "ID number, code, reference, serial number"},
+    {"id": "concept", "description": "Abstract topic (privacy, risk, strategy, quality, workflow)"}
+  ],
+  "functional_roles": [
+    "parent_organization",
+    "branch",
+    "operator",
+    "operated_unit",
+    "planned_unit",
+    "staff_member",
+    "deputy_manager",
+    "external_partner",
+    "service_provider",
+    "headquarters",
+    "regional_hub",
+    "medical_courier",
+    "transport_provider"
+  ],
+  "statuses": {
+    "entity": ["active", "planned", "inactive", "former", "prospective", "historical", "completed", "resolved", "unknown"],
+    "edge": ["active", "planned", "backup", "conditional", "historical", "unknown"]
+  },
+  "relations": [
+    {
+      "category": "STRUCTURE",
+      "items": [
+        {"id": "HAS_BRANCH", "description": "Organization has an active branch/site", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "HAS_PLANNED_BRANCH", "description": "Organization has a planned/future branch", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "PART_OF", "description": "Entity is part of a larger entity", "source_types": ["organization", "location"], "target_types": ["organization", "location"]},
+        {"id": "HEADQUARTERED_AT", "description": "Organization headquarters location", "source_types": ["organization"], "target_types": ["location", "address"]}
+      ]
+    },
+    {
+      "category": "LOCATION",
+      "items": [
+        {"id": "LOCATED_AT", "description": "Entity is at a specific address", "source_types": ["organization", "person", "physical_object", "technology", "event"], "target_types": ["address", "location"]},
+        {"id": "LOCATED_IN", "description": "Entity is within a geographic area", "source_types": ["organization", "address", "location", "event"], "target_types": ["location"]},
+        {"id": "NEAR", "description": "Entity is near another entity", "symmetric": true}
+      ]
+    },
+    {
+      "category": "PEOPLE",
+      "items": [
+        {"id": "HAS_ROLE", "description": "Person holds a role/title", "source_types": ["person"], "target_types": ["role"]},
+        {"id": "MANAGES", "description": "Person is the main manager of entity", "source_types": ["person"], "target_types": ["organization", "location"]},
+        {"id": "HAS_DEPUTY_MANAGER", "description": "Organization has a deputy/acting manager", "source_types": ["organization"], "target_types": ["person"]},
+        {"id": "BASED_AT", "description": "Person's primary work location", "source_types": ["person"], "target_types": ["organization", "location"]},
+        {"id": "VISITS", "description": "Person visits/rotates to a location", "source_types": ["person"], "target_types": ["organization", "location"]},
+        {"id": "PROVIDES_REMOTE_SERVICE_FOR", "description": "Person provides remote service for org", "source_types": ["person"], "target_types": ["organization"]},
+        {"id": "PROVIDES_SERVICE_FOR", "description": "Person provides on-site service for org", "source_types": ["person"], "target_types": ["organization"]},
+        {"id": "DOES_NOT_WORK_AT", "description": "Person explicitly does not work at entity (negative fact)", "source_types": ["person"], "target_types": ["organization", "location"]},
+        {"id": "REPORTS_TO", "description": "Person reports to another person", "source_types": ["person"], "target_types": ["person"]},
+        {"id": "FOUNDED_BY", "description": "Organization founded by person", "source_types": ["organization"], "target_types": ["person"]}
+      ]
+    },
+    {
+      "category": "SERVICE",
+      "items": [
+        {"id": "OFFERS", "description": "Organization offers a service/product", "source_types": ["organization"], "target_types": ["service", "product"]},
+        {"id": "PLANNED_SERVICE", "description": "Organization plans to offer a service (not yet active)", "source_types": ["organization"], "target_types": ["service", "product"]},
+        {"id": "DOES_NOT_OFFER", "description": "Organization explicitly does not offer", "source_types": ["organization"], "target_types": ["service", "product"]},
+        {"id": "REQUIRES", "description": "Service/product requires another", "target_types": ["service", "product", "technology"]},
+        {"id": "SPECIALIZES_IN", "description": "Entity specializes in a domain/service", "target_types": ["service", "concept"]},
+        {"id": "SERVES_LANGUAGE", "description": "Entity serves clients in a language", "target_types": ["language"]},
+        {"id": "HAS_OPERATING_HOURS", "description": "Entity has specific operating schedule", "target_types": ["date_time", "concept"]}
+      ]
+    },
+    {
+      "category": "PARTNER_CONTRACT",
+      "items": [
+        {"id": "PARTNERS_WITH", "description": "Two independent entities partner", "source_types": ["organization"], "target_types": ["organization"], "symmetric": true},
+        {"id": "FULFILLS_PRESCRIPTIONS_FOR", "description": "Partner fills prescriptions for organization", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "PROCESSES_TESTS_FOR", "description": "Partner processes lab tests for organization", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "PROCESSES_CORPORATE_PANELS_FOR", "description": "Partner handles corporate screening for org", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "TRANSPORTS_SAMPLES_FOR", "description": "Partner transports samples for organization", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "PROVIDES_PATIENT_TRANSPORT_FOR", "description": "Partner provides patient transportation for organization", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "HANDLES_BILLING_FOR", "description": "Partner handles billing for organization", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "CONTRACTED_WITH", "description": "Entity has a contract with another", "source_types": ["organization"], "target_types": ["organization"], "symmetric": true},
+        {"id": "HAS_AGREEMENT_WITH", "description": "Entity has agreement with another", "source_types": ["organization"], "target_types": ["organization"], "symmetric": true},
+        {"id": "NO_CONTRACT_WITH", "description": "Explicitly no contract between entities", "source_types": ["organization"], "target_types": ["organization"], "symmetric": true},
+        {"id": "DOES_NOT_HANDLE_BILLING_FOR", "description": "Explicitly does not handle billing for org (negative fact)", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "DOES_NOT_HANDLE_REIMBURSEMENT_FOR", "description": "Explicitly does not handle reimbursement (negative fact)", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "DOES_NOT_HANDLE_CLAIMS_FOR", "description": "Explicitly does not handle claims for org (negative fact)", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "DOES_NOT_PROCESS_TESTS_FOR", "description": "Explicitly does not process tests for org (negative fact)", "source_types": ["organization"], "target_types": ["organization"]},
+        {"id": "EVALUATING_PARTNERSHIP_WITH", "description": "Considering partnership", "source_types": ["organization"], "target_types": ["organization"]}
+      ]
+    },
+    {
+      "category": "EVENT",
+      "items": [
+        {"id": "OCCURRED_ON", "description": "Event occurred on date", "source_types": ["event"], "target_types": ["date_time"]},
+        {"id": "INVOLVES", "description": "Event involves entity", "source_types": ["event"]},
+        {"id": "CAUSED_BY", "description": "Event caused by another event/entity", "source_types": ["event"]},
+        {"id": "AFFECTS", "description": "Event/incident affects entity (not for org->org)", "source_types": ["event"]},
+        {"id": "ESCALATED_TO", "description": "Incident/issue escalated to entity"},
+        {"id": "NOTIFIED", "description": "Entity was notified about event"},
+        {"id": "REPORTED_BY", "description": "Event reported by entity"}
+      ]
+    },
+    {
+      "category": "TECHNOLOGY",
+      "items": [
+        {"id": "INTEGRATED_WITH", "description": "System integrated with another", "source_types": ["technology", "organization"], "target_types": ["technology"], "symmetric": true},
+        {"id": "OWNS", "description": "Entity owns another entity"},
+        {"id": "USES", "description": "Entity uses a technology/tool", "target_types": ["technology", "product"]},
+        {"id": "HAS_PORTAL", "description": "Organization has a tech portal", "source_types": ["organization"], "target_types": ["technology"]}
+      ]
+    },
+    {
+      "category": "IDENTITY",
+      "items": [
+        {"id": "ALIAS_OF", "description": "Entity is an alias of another (internal use only)"}
+      ]
+    }
+  ],
+  "relation_aliases": {
+    "BRANCH_OF": "PART_OF",
+    "OPERATES": "HAS_BRANCH",
+    "OPERATED_BY": "HAS_BRANCH",
+    "HAS_SITE": "HAS_BRANCH",
+    "PLANS_BRANCH": "HAS_PLANNED_BRANCH",
+    "SUBSIDIARY_OF": "PART_OF",
+    "BELONGS_TO": "PART_OF",
+    "HQ_AT": "HEADQUARTERED_AT",
+    "HAS_HQ": "HEADQUARTERED_AT",
+    "IN": "LOCATED_IN",
+    "AT": "LOCATED_AT",
+    "ADDRESS": "LOCATED_AT",
+    "HAS_ADDRESS": "LOCATED_AT",
+    "WORKS_AT": "BASED_AT",
+    "EMPLOYED_BY": "BASED_AT",
+    "EMPLOYED_AT": "BASED_AT",
+    "MANAGED_BY": "MANAGES",
+    "BRANCH_MANAGER_OF": "MANAGES",
+    "HAS_PRACTITIONER": "PROVIDES_SERVICE_FOR",
+    "PROVIDES_FOR": "PROVIDES_SERVICE_FOR",
+    "SERVES_AT": "PROVIDES_SERVICE_FOR",
+    "STAFFED_BY": "PROVIDES_SERVICE_FOR",
+    "DEPUTY_MANAGER_OF": "HAS_DEPUTY_MANAGER",
+    "ACTING_MANAGER_OF": "HAS_DEPUTY_MANAGER",
+    "PROVIDES": "OFFERS",
+    "HAS_SERVICE": "OFFERS",
+    "OFFERS_SERVICE": "OFFERS",
+    "WILL_OFFER": "PLANNED_SERVICE",
+    "PLANS_TO_OFFER": "PLANNED_SERVICE",
+    "FUTURE_SERVICE": "PLANNED_SERVICE",
+    "NOT_EMPLOYED_AT": "DOES_NOT_WORK_AT",
+    "LEFT": "DOES_NOT_WORK_AT",
+    "NO_LONGER_AT": "DOES_NOT_WORK_AT",
+    "PARTNER_OF": "PARTNERS_WITH",
+    "HAS_PARTNERSHIP_WITH": "PARTNERS_WITH",
+    "FULFILLMENT_PARTNER_FOR": "PARTNERS_WITH",
+    "HAS_CONTRACT_WITH": "CONTRACTED_WITH",
+    "FILLS_PRESCRIPTIONS_FOR": "FULFILLS_PRESCRIPTIONS_FOR",
+    "RUNS_LAB_TESTS_FOR": "PROCESSES_TESTS_FOR",
+    "HANDLES_CORPORATE_PANELS_FOR": "PROCESSES_CORPORATE_PANELS_FOR",
+    "COURIER_FOR": "TRANSPORTS_SAMPLES_FOR",
+    "BILLS_FOR": "HANDLES_BILLING_FOR",
+    "DOES_NOT_BILL_FOR": "DOES_NOT_HANDLE_BILLING_FOR",
+    "NOT_BILLING_FOR": "DOES_NOT_HANDLE_BILLING_FOR",
+    "DOES_NOT_REIMBURSE_FOR": "DOES_NOT_HANDLE_REIMBURSEMENT_FOR",
+    "DOES_NOT_CLAIM_FOR": "DOES_NOT_HANDLE_CLAIMS_FOR",
+    "NOT_PROCESSING_TESTS_FOR": "DOES_NOT_PROCESS_TESTS_FOR",
+    "CONNECTED_TO": "INTEGRATED_WITH",
+    "HAS_SYSTEM": "USES",
+    "RUNS_ON": "USES",
+    "RELATED_TO": "",
+    "ASSOCIATED_WITH": "",
+    "HANDLES": "",
+    "WORKS_WITH": "",
+    "SUPPORTS": "",
+    "HELPS": "",
+    "INTERACTS_WITH": "",
+    "LINKED_TO": "",
+    "DEPENDS_ON": "REQUIRES"
+  },
+  "relation_rules": [
+    {"relation": "HAS_BRANCH", "source_roles": ["parent_organization", "operator"], "target_roles": ["branch", "operated_unit"], "target_domain_types": ["branch_office", "clinic", "care_center", "wellness_hub", "service_center"], "forbidden_target_statuses": ["planned"]},
+    {"relation": "HAS_PLANNED_BRANCH", "source_roles": ["parent_organization", "operator"], "target_roles": ["branch", "operated_unit", "planned_unit"], "target_domain_types": ["branch_office", "clinic", "care_center", "wellness_hub", "service_center"]},
+    {"relation": "MANAGES", "source_roles": ["staff_member"]},
+    {"relation": "HAS_DEPUTY_MANAGER", "target_roles": ["deputy_manager", "staff_member"]},
+    {"relation": "PARTNERS_WITH", "source_roles": ["external_partner", "parent_organization"], "target_roles": ["external_partner", "parent_organization"]},
+    {"relation": "BASED_AT", "source_roles": ["staff_member"]},
+    {"relation": "VISITS", "source_roles": ["staff_member", "service_provider"]},
+    {"relation": "PROVIDES_SERVICE_FOR", "source_roles": ["staff_member", "service_provider"]},
+    {"relation": "PROVIDES_REMOTE_SERVICE_FOR", "source_roles": ["staff_member", "service_provider"]},
+    {"relation": "HEADQUARTERED_AT", "target_roles": ["headquarters"]},
+    {"relation": "OFFERS", "forbidden_source_statuses": ["planned"]},
+    {"relation": "PLANNED_SERVICE", "source_roles": ["planned_unit", "branch", "operated_unit"]},
+    {"relation": "TRANSPORTS_SAMPLES_FOR", "source_roles": ["medical_courier", "transport_provider", "logistics_provider"], "forbidden_source_domain_types": ["laboratory", "diagnostics_lab", "lab", "pharmacy", "insurance_services", "imaging_provider"]},
+    {"relation": "PROVIDES_PATIENT_TRANSPORT_FOR", "source_roles": ["transport_provider"]},
+    {"relation": "PROCESSES_TESTS_FOR", "source_domain_types": ["laboratory", "diagnostics_lab", "lab"], "target_roles": ["branch", "operated_unit"], "forbidden_source_roles": ["branch", "operated_unit"], "can_flip_direction": true}
+  ],
+  "canonicalization": {
+    "service_modifiers": ["basic ", "routine ", "corporate ", "general ", "standard ", "walk-in ", "walk in ", "on-site ", "onsite "],
+    "branch_hints": ["branch", "clinic", "hub", "center", "centre", "care", "site", "office"]
+  }
+}

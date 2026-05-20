@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"rediskg/internal/schema"
 	"rediskg/pkg/models"
 )
 
@@ -13,37 +14,19 @@ import (
 // Service canonicalization
 // ---------------------------------------------------------------------------
 
-// knownServiceSynonyms maps noisy service variants to a single canonical form.
-// These are domain-stable singular/plural and phrasing collapses.
-var knownServiceSynonyms = map[string]string{
-	"blood test":                     "blood tests",
-	"basic blood test":               "blood tests",
-	"basic blood tests":              "blood tests",
-	"routine blood test":             "blood tests",
-	"routine blood tests":            "blood tests",
-	"routine walk-in blood test":     "blood tests",
-	"routine walk-in blood tests":    "blood tests",
-	"corporate blood panel":          "blood tests",
-	"corporate blood panels":         "blood tests",
-	"corporate screening blood panel":  "blood tests",
-	"corporate screening blood panels": "blood tests",
-	"vaccination":                    "vaccinations",
-	"routine vaccination":            "vaccinations",
-	"routine vaccination administration": "vaccinations",
-	"vaccine administration":         "vaccinations",
-}
-
-// addServiceCanonRules adds deterministic service-name collapse rules to the
-// alias map BEFORE canonical selection and edge rewriting, so both entities and
-// edges converge on a single canonical service node.
+// addServiceCanonRules adds *generic* service-name collapse rules to the
+// alias map BEFORE canonical selection and edge rewriting. Two passes,
+// both domain-neutral:
+//  1. Singular -> plural collapse when both forms were extracted.
+//  2. Modifier-prefixed variants fold into the bare service when the bare
+//     service also exists. The modifier list lives in schema.Canonicalization
+//     and is loaded from ontology.json so it can be tuned without code edits.
 //
-// Three deterministic passes, applied only to service-typed entities:
-//  1. Known synonym table (e.g. "blood test" -> "blood tests").
-//  2. Generic singular -> plural collapse when both forms were extracted.
-//  3. Modifier-prefixed variants ("basic X", "corporate X") fold into the
-//     bare service when the bare service also exists.
+// (A previous version of this function carried a hardcoded healthcare
+// synonym table. It was removed — that data belongs in tenant config, not
+// in the ingest engine. The generic collapses below still do most of the
+// work without baking customer-specific terms into the binary.)
 func addServiceCanonRules(entities []models.CandidateEntity, aliasMap map[string]string) {
-	// Collect the set of service-typed entity names actually present.
 	serviceNames := map[string]bool{}
 	for _, e := range entities {
 		name := canonName(e)
@@ -63,7 +46,6 @@ func addServiceCanonRules(entities []models.CandidateEntity, aliasMap map[string
 
 	added := 0
 	resolve := func(n string) string {
-		// Follow alias chain to its terminal target.
 		seen := map[string]bool{}
 		for {
 			next, ok := aliasMap[n]
@@ -75,37 +57,25 @@ func addServiceCanonRules(entities []models.CandidateEntity, aliasMap map[string
 		}
 	}
 
-	// Pass 1: known synonyms.
-	for variant, canonical := range knownServiceSynonyms {
-		if !serviceNames[variant] {
-			continue
-		}
-		if variant == canonical {
-			continue
-		}
-		if _, exists := aliasMap[variant]; !exists {
-			aliasMap[variant] = canonical
-			added++
-		}
-	}
-
-	// Pass 2: generic singular -> plural collapse (only when both were extracted).
+	// Pass 1: generic singular -> plural collapse (only when both were extracted).
 	for name := range serviceNames {
 		if _, mapped := aliasMap[name]; mapped {
 			continue
 		}
-		plural := name + "s"
 		if strings.HasSuffix(name, "s") {
 			continue
 		}
+		plural := name + "s"
 		if serviceNames[plural] && resolve(plural) != name {
 			aliasMap[name] = plural
 			added++
 		}
 	}
 
-	// Pass 3: modifier-prefixed variants fold into the bare service.
-	modifiers := []string{"basic ", "routine ", "corporate ", "general ", "standard ", "walk-in ", "walk in ", "on-site ", "onsite "}
+	// Pass 2: modifier-prefixed variants fold into the bare service. The
+	// modifier list comes from schema.Canonicalization (loaded from
+	// ontology.json), not from a hardcoded table.
+	modifiers := schema.Canonicalization.ServiceModifiers
 	for name := range serviceNames {
 		if _, mapped := aliasMap[name]; mapped {
 			continue
@@ -273,7 +243,10 @@ func extractTemporalFacts(fg *models.FinalGraph) {
 // Deterministic HAS_BRANCH completion
 // ---------------------------------------------------------------------------
 
-var branchDomainHints = []string{"branch", "clinic", "hub", "center", "centre", "care", "site", "office"}
+// branchHints returns the tenant-configured branch-name token list used by
+// HAS_BRANCH completion. Sourced from schema.Canonicalization (ontology.json),
+// so it can be tuned without code changes.
+func branchHints() []string { return schema.Canonicalization.BranchHints }
 
 // completeBranchEdges deterministically recovers missing HAS_BRANCH edges.
 //
@@ -302,7 +275,7 @@ func completeBranchEdges(edges []models.CandidateEdge, entities map[string]*mode
 			return false
 		}
 		for _, dt := range ent.DomainTypes {
-			if containsAny(strings.ToLower(dt), branchDomainHints) {
+			if containsAny(strings.ToLower(dt), branchHints()) {
 				return true
 			}
 		}
@@ -312,7 +285,7 @@ func completeBranchEdges(edges []models.CandidateEdge, entities map[string]*mode
 			}
 		}
 		name := strings.ToLower(ent.CanonicalName)
-		return containsAny(name, branchDomainHints)
+		return containsAny(name, branchHints())
 	}
 
 	added := 0

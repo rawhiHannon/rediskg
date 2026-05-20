@@ -97,11 +97,13 @@ type EntityTypeInfo struct {
 }
 
 // GraphNode is a node in a focused subgraph returned to the UI.
+// Group carries either the literal "focus" for nodes that directly answered
+// the question (so the UI can highlight them) or the entity type/category
+// (e.g. "person", "organization") for coloring.
 type GraphNode struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
-	Type  string `json:"type,omitempty"`
-	Focus bool   `json:"focus,omitempty"` // true if this node directly answered the question
+	Group string `json:"group,omitempty"`
 }
 
 // GraphEdge is an edge in a focused subgraph returned to the UI.
@@ -119,11 +121,14 @@ type SubGraph struct {
 }
 
 // QueryResult holds the response to a natural language query.
-// The two primary fields are Answer (human-readable response) and Graph
-// (the focused subgraph the answer was derived from, for UI rendering).
+// The two primary fields are Answer (human-readable response, only populated
+// when the caller asks for one) and Graph (the focused subgraph the answer
+// was derived from, for UI rendering). Facts is the raw evidence list — useful
+// for agent callers that skip the LLM step and want to do their own reasoning.
 type QueryResult struct {
 	Answer string   `json:"answer"`
 	Graph  SubGraph `json:"graph"`
+	Facts  []string `json:"facts,omitempty"`
 
 	// Secondary/debug fields.
 	Entities []map[string]interface{} `json:"entities,omitempty"`

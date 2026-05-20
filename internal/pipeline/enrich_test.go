@@ -15,25 +15,36 @@ func svc(name string) models.CandidateEntity {
 }
 
 func TestAddServiceCanonRules(t *testing.T) {
+	// Tests the two *generic* collapses the post-refactor function still
+	// does: singular -> plural (when both forms appear) and bare-modifier
+	// stripping driven by schema.Canonicalization.ServiceModifiers from
+	// ontology.json. The healthcare-specific synonym table was deleted.
 	entities := []models.CandidateEntity{
 		svc("blood test"), svc("blood tests"),
-		svc("basic blood tests"), svc("corporate blood panels"),
+		svc("basic blood tests"),
 		svc("vaccination"), svc("vaccinations"),
-		svc("routine vaccination administration"),
 	}
 	aliasMap := map[string]string{}
 	addServiceCanonRules(entities, aliasMap)
 
 	want := map[string]string{
-		"blood test":                         "blood tests",
-		"basic blood tests":                  "blood tests",
-		"corporate blood panels":             "blood tests",
-		"vaccination":                        "vaccinations",
-		"routine vaccination administration": "vaccinations",
+		"blood test":        "blood tests", // singular/plural
+		"basic blood tests": "blood tests", // modifier strip ("basic ")
+		"vaccination":       "vaccinations", // singular/plural
 	}
 	for k, v := range want {
 		if aliasMap[k] != v {
 			t.Errorf("aliasMap[%q] = %q, want %q", k, aliasMap[k], v)
+		}
+	}
+
+	// "corporate blood panels" used to map via the synonym table; without
+	// the table, the bare form "blood panels" isn't in the corpus so
+	// nothing collapses. That's the intended behaviour after the removal.
+	mustNotCollapse := []string{"corporate blood panels", "routine vaccination administration"}
+	for _, k := range mustNotCollapse {
+		if _, ok := aliasMap[k]; ok {
+			t.Errorf("aliasMap[%q] should be absent without domain synonym table; got %q", k, aliasMap[k])
 		}
 	}
 }

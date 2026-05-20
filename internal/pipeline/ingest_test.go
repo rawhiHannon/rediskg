@@ -571,69 +571,9 @@ func TestResolveNegativeConflicts_BillingOverride(t *testing.T) {
 	}
 }
 
-// --- Suffix alias rule tests ---
-
-func TestAddSuffixAliasRules_MergesBranchSuffix(t *testing.T) {
-	entities := []models.CandidateEntity{
-		{Mention: "cedargate jerusalem south", CanonicalName: "cedargate jerusalem south"},
-		{Mention: "cedargate jerusalem south branch", CanonicalName: "cedargate jerusalem south branch"},
-	}
-
-	aliasMap := map[string]string{}
-	addSuffixAliasRules(entities, aliasMap)
-
-	if aliasMap["cedargate jerusalem south branch"] != "cedargate jerusalem south" {
-		t.Errorf("expected suffix merge, got %q", aliasMap["cedargate jerusalem south branch"])
-	}
-}
-
-func TestAddSuffixAliasRules_NoMergeWithoutShorterForm(t *testing.T) {
-	entities := []models.CandidateEntity{
-		{Mention: "haifa central branch", CanonicalName: "haifa central branch"},
-	}
-
-	aliasMap := map[string]string{}
-	addSuffixAliasRules(entities, aliasMap)
-
-	if _, ok := aliasMap["haifa central branch"]; ok {
-		t.Error("should not merge when shorter form does not exist")
-	}
-}
-
-// --- Short branch alias tests ---
-
-func TestAddSuffixAliasRules_ShortBranchToLongerCanonical(t *testing.T) {
-	entities := []models.CandidateEntity{
-		{Mention: "cedargate jerusalem south", CanonicalName: "cedargate jerusalem south"},
-		{Mention: "jerusalem south branch", CanonicalName: "jerusalem south branch"},
-	}
-
-	aliasMap := map[string]string{}
-	addSuffixAliasRules(entities, aliasMap)
-
-	if aliasMap["jerusalem south branch"] != "cedargate jerusalem south" {
-		t.Errorf("expected 'jerusalem south branch' -> 'cedargate jerusalem south', got %q", aliasMap["jerusalem south branch"])
-	}
-}
-
-func TestAddSuffixAliasRules_PicksLongestMatch(t *testing.T) {
-	entities := []models.CandidateEntity{
-		{Mention: "cedargate jerusalem south", CanonicalName: "cedargate jerusalem south"},
-		{Mention: "jerusalem south", CanonicalName: "jerusalem south"},
-		{Mention: "jerusalem south branch", CanonicalName: "jerusalem south branch"},
-	}
-
-	aliasMap := map[string]string{}
-	addSuffixAliasRules(entities, aliasMap)
-
-	// Pass 1 should match exact suffix strip: "jerusalem south branch" -> "jerusalem south"
-	// But pass 2 should pick "cedargate jerusalem south" as longest match
-	// However pass 1 runs first and finds "jerusalem south", so it should map there
-	// Actually, pass 1 maps it already, so pass 2 skips it
-	if aliasMap["jerusalem south branch"] != "jerusalem south" {
-		t.Errorf("expected exact suffix match first: 'jerusalem south branch' -> 'jerusalem south', got %q", aliasMap["jerusalem south branch"])
-	}
-}
+// (Suffix alias rule tests removed alongside addSuffixAliasRules — that
+// healthcare-leaning heuristic was deleted; the LLM verify pass + the
+// exact-match resolver are expected to handle suffix-only duplicates.)
 
 // --- Clean conflicting functional roles tests ---
 

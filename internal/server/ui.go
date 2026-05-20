@@ -35,6 +35,24 @@ const graphHTML = `<!DOCTYPE html>
     --radius: 10px;
     --radius-sm: 6px;
     --shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+    /* The graph canvas stays on a dark surface in both themes so node labels
+       remain readable without re-styling vis-network on every theme toggle. */
+    --graph-bg: #050510;
+  }
+
+  :root[data-theme="light"] {
+    --bg-primary: #f5f6fb;
+    --bg-secondary: #ffffff;
+    --bg-card: rgba(255, 255, 255, 0.95);
+    --bg-input: #f1f2f7;
+    --bg-hover: rgba(99, 102, 241, 0.08);
+    --border: rgba(20, 20, 80, 0.10);
+    --border-focus: rgba(99, 102, 241, 0.45);
+    --text-primary: #131326;
+    --text-secondary: #4a4a6a;
+    --text-dim: #8a8aa8;
+    --accent-glow: rgba(99, 102, 241, 0.18);
+    --shadow: 0 4px 24px rgba(20, 20, 60, 0.08);
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -56,6 +74,11 @@ const graphHTML = `<!DOCTYPE html>
       radial-gradient(ellipse at 80% 20%, rgba(34, 211, 238, 0.04) 0%, transparent 50%);
     pointer-events: none;
     z-index: 0;
+  }
+  :root[data-theme="light"] body::before {
+    background:
+      radial-gradient(ellipse at 20% 50%, rgba(99, 102, 241, 0.06) 0%, transparent 60%),
+      radial-gradient(ellipse at 80% 20%, rgba(34, 211, 238, 0.05) 0%, transparent 50%);
   }
 
   #app {
@@ -84,6 +107,27 @@ const graphHTML = `<!DOCTYPE html>
     gap: 14px;
     border-bottom: 1px solid var(--border);
   }
+
+  .theme-toggle {
+    margin-left: auto;
+    width: 34px; height: 34px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .theme-toggle:hover {
+    background: var(--bg-hover);
+    color: var(--accent-bright);
+    border-color: var(--border-focus);
+  }
+  .theme-toggle svg { width: 16px; height: 16px; }
+  .theme-toggle .icon-sun { display: none; }
+  :root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
+  :root[data-theme="light"] .theme-toggle .icon-sun { display: block; }
 
   .logo {
     width: 36px; height: 36px;
@@ -208,32 +252,32 @@ const graphHTML = `<!DOCTYPE html>
 
   .send-btn svg { width: 18px; height: 18px; }
 
-  /* ======================== TABS ======================== */
+  /* ======================== TABS (vertical history list) ======================== */
   #tabs-bar {
     display: flex;
-    gap: 0;
-    overflow-x: auto;
-    min-height: 40px;
-    background: rgba(5, 5, 16, 0.5);
+    flex-direction: column;
+    overflow-y: auto;
+    overflow-x: hidden;
+    max-height: 30vh;
+    background: rgba(5, 5, 16, 0.3);
     border-bottom: 1px solid var(--border);
-    scrollbar-width: none;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
   }
-  #tabs-bar::-webkit-scrollbar { display: none; }
+  #tabs-bar::-webkit-scrollbar { width: 4px; }
+  #tabs-bar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
   .tab {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 16px;
-    height: 40px;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 16px;
+    min-height: 42px;
     font-size: 12px;
     font-weight: 500;
     color: var(--text-dim);
     cursor: pointer;
-    white-space: nowrap;
-    border-right: 1px solid var(--border);
-    flex-shrink: 0;
-    max-width: 200px;
+    border-bottom: 1px solid var(--border);
     transition: all 0.15s;
     position: relative;
   }
@@ -248,28 +292,43 @@ const graphHTML = `<!DOCTYPE html>
     background: var(--bg-card);
   }
 
-  .tab.active::after {
+  /* Vertical accent on the left (was a horizontal underline). */
+  .tab.active::before {
     content: '';
     position: absolute;
-    bottom: 0; left: 0; right: 0;
-    height: 2px;
-    background: linear-gradient(90deg, var(--accent), var(--accent-bright));
-    border-radius: 2px 2px 0 0;
+    top: 0; bottom: 0; left: 0;
+    width: 3px;
+    background: linear-gradient(180deg, var(--accent), var(--accent-bright));
+    border-radius: 0 2px 2px 0;
   }
 
-  .tab-icon { font-size: 14px; flex-shrink: 0; }
-  .tab-label { overflow: hidden; text-overflow: ellipsis; }
+  .tab-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+  .tab-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    line-clamp: 2;
+    line-height: 1.4;
+    word-break: break-word;
+    white-space: normal;
+  }
 
   .tab-close {
     font-size: 10px;
-    width: 18px; height: 18px;
+    width: 20px; height: 20px;
     display: flex; align-items: center; justify-content: center;
     border-radius: 4px;
     color: var(--text-dim);
     cursor: pointer;
     flex-shrink: 0;
     transition: all 0.15s;
+    opacity: 0;
   }
+  .tab:hover .tab-close,
+  .tab.active .tab-close { opacity: 1; }
 
   .tab-close:hover {
     background: var(--red-glow);
@@ -279,10 +338,12 @@ const graphHTML = `<!DOCTYPE html>
   .tab-graph {
     color: var(--green) !important;
     font-weight: 600;
+    min-height: 38px;
+    align-items: center;
   }
-
+  .tab-graph .tab-label { -webkit-line-clamp: 1; line-clamp: 1; }
   .tab-graph .tab-icon { color: var(--green); }
-  .tab-graph.active::after { background: linear-gradient(90deg, var(--green), #10b981); }
+  .tab-graph.active::before { background: linear-gradient(180deg, var(--green), #10b981); }
 
   /* ======================== ANSWER SECTION ======================== */
   #answer-section {
@@ -473,7 +534,7 @@ const graphHTML = `<!DOCTYPE html>
   #graph-wrapper {
     flex: 1;
     position: relative;
-    background: var(--bg-primary);
+    background: var(--graph-bg);
   }
 
   #graph-container {
@@ -609,6 +670,10 @@ const graphHTML = `<!DOCTYPE html>
         <h1>RedisKG</h1>
         <div class="subtitle">Knowledge Graph Explorer</div>
       </div>
+      <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark" aria-label="Toggle theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+      </button>
     </div>
 
     <div id="stats-bar">
@@ -673,6 +738,21 @@ const graphHTML = `<!DOCTYPE html>
 </div>
 
 <script>
+// Theme: persisted in localStorage. Applied before any rendering so the
+// flash-of-wrong-theme is avoided.
+(function initTheme() {
+  let t = 'dark';
+  try { t = localStorage.getItem('rediskg-theme') || 'dark'; } catch (e) {}
+  document.documentElement.dataset.theme = t;
+})();
+
+function toggleTheme() {
+  const cur = document.documentElement.dataset.theme || 'dark';
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('rediskg-theme', next); } catch (e) {}
+}
+
 let network = null;
 let nodesDS = null;
 let edgesDS = null;
@@ -866,10 +946,10 @@ function renderTabs() {
 
   for (const qa of qaHistory) {
     const isActive = activeTab === qa.id;
-    const label = qa.question.length > 24 ? qa.question.substring(0, 24) + '...' : qa.question;
+    // Full question text; CSS line-clamp wraps it to 2 lines with ellipsis.
     html += '<div class="tab ' + (isActive ? 'active' : '') + '" onclick="switchToTab(\'' + qa.id + '\')">';
     html += '<span class="tab-icon">&#9671;</span>';
-    html += '<span class="tab-label" title="' + qa.question.replace(/"/g, '&quot;') + '">' + escapeHtml(label) + '</span>';
+    html += '<span class="tab-label" title="' + qa.question.replace(/"/g, '&quot;') + '">' + escapeHtml(qa.question) + '</span>';
     html += '<span class="tab-close" onclick="event.stopPropagation(); closeTab(\'' + qa.id + '\')">&#x2715;</span>';
     html += '</div>';
   }
@@ -936,10 +1016,13 @@ async function askQuestion() {
   input.value = '';
 
   try {
+    // UI always asks for the human-readable answer. Agent callers hitting
+    // /api/query directly can omit the human flag (or set it to false) to
+    // skip the extra LLM round-trip and just get graph + facts.
     const res = await fetch('/api/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question })
+      body: JSON.stringify({ question, human: true })
     });
     const data = await res.json();
 

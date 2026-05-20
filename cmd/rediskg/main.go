@@ -184,7 +184,7 @@ func runIngest(cfg *config.Config, path string) {
 func runQuery(cfg *config.Config, question string) {
 	p := createPipeline(cfg)
 
-	result, err := p.Query(question)
+	result, err := p.Query(question, true)
 	if err != nil {
 		log.Fatalf("Query failed: %v", err)
 	}
@@ -213,7 +213,7 @@ func runInteractiveQuery(cfg *config.Config) {
 			break
 		}
 
-		result, err := p.Query(question)
+		result, err := p.Query(question, true)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue

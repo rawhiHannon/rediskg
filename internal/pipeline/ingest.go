@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 
-	"rediskg/internal/chunker"
 	"rediskg/internal/llm"
 	"rediskg/internal/loader"
 	"rediskg/internal/schema"
@@ -31,10 +30,24 @@ import (
 func (p *Pipeline) Ingest(docs []*models.Document) error {
 	log.Println("Starting ingestion pipeline...")
 
-	// Phase 1: Chunk documents
+	// Phase 0: SHA-256 short-circuit — skip docs whose stored content_hash
+	// already matches. (Idempotent re-ingest pattern lifted from GraphRAG-SDK.)
+	docs = filterUnchangedDocs(p.store, docs)
+	if len(docs) == 0 {
+		log.Println("All documents unchanged, nothing to ingest")
+		return nil
+	}
+
+	// Phase 1: Chunk documents (via the pluggable Chunker strategy).
 	log.Println("[1/10] Chunking documents...")
-	chunks := chunker.ChunkDocuments(docs, p.cfg.ChunkSize, p.cfg.ChunkOverlap)
+	chunks := p.Chunker.ChunkDocuments(docs, p.cfg.ChunkSize, p.cfg.ChunkOverlap)
 	log.Printf("  Created %d chunks", len(chunks))
+
+	// Phase 1b: Lexical backbone — Document + Chunk + PART_OF + NEXT_CHUNK.
+	// Written upfront so MENTIONED_IN edges (later) can MATCH the Chunk
+	// nodes by id. Tagged separately from entities (:Concept) so it
+	// doesn't pollute entity-level queries.
+	writeLexicalBackbone(p.store, docs, chunks)
 
 	// Phase 2: Extract candidates (schema-constrained)
 	log.Println("[2/10] Extracting candidates (schema-constrained)...")
@@ -46,41 +59,22 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 		return fmt.Errorf("no entities extracted from documents")
 	}
 
-	// Phase 2b: Filter raw value entities (dates, times, quantities — type + regex)
-	preFilter := len(candidateGraph.Entities)
-	candidateGraph.Entities = filterRawValueEntities(candidateGraph.Entities)
-	if preFilter != len(candidateGraph.Entities) {
-		log.Printf("  Filtered %d raw value entities (%d remaining)",
-			preFilter-len(candidateGraph.Entities), len(candidateGraph.Entities))
-	}
+	// Phase 2b: Quality filter — one named phase that drops raw value
+	// entities (dates/times/quantities), entities with empty ID/label, and
+	// any edge whose endpoints were filtered. Same intent as upstream
+	// GraphRAG-SDK's _filter_quality step, just applied to our candidate
+	// graph shape.
+	candidateGraph = qualityFilter(candidateGraph)
 
-	// Phase 2c: Remove edges whose endpoints were filtered
-	preOrphan := len(candidateGraph.Edges)
-	candidateGraph.Edges = filterOrphanEdges(candidateGraph.Edges, candidateGraph.Entities)
-	if preOrphan != len(candidateGraph.Edges) {
-		log.Printf("  Filtered %d orphan edges (%d remaining)",
-			preOrphan-len(candidateGraph.Edges), len(candidateGraph.Edges))
-	}
+	// Phases 3-4: Resolve candidates → canonical entities via the pluggable
+	// Resolver strategy (default builds an alias map + selects canonicals).
+	log.Println("[3/14] Resolving canonical entities...")
+	canonicalEntities, aliasMap := p.Resolver.Resolve(candidateGraph.Entities)
+	log.Printf("  %d canonical entities, %d alias mappings", len(canonicalEntities), len(aliasMap))
 
-	// Phase 3: Group aliases and deduplicate entity mentions
-	log.Println("[3/14] Grouping aliases...")
-	aliasMap := buildAliasMap(candidateGraph.Entities)
-	addSuffixAliasRules(candidateGraph.Entities, aliasMap)
-	addServiceCanonRules(candidateGraph.Entities, aliasMap)
-	log.Printf("  Found %d alias mappings", len(aliasMap))
-
-	// Phase 4: Select canonical entities (merge duplicates, pick best types)
-	log.Println("[4/14] Selecting canonical entities...")
-	canonicalEntities := selectCanonicalEntities(candidateGraph.Entities, aliasMap)
-	log.Printf("  %d canonical entities", len(canonicalEntities))
-
-	// Phase 4b: Clean conflicting functional roles
-	cleanConflictingFunctionalRoles(canonicalEntities)
-
-	// Phase 4c: Fix event entity statuses (incidents != planned)
-	fixEntityStatuses(canonicalEntities)
-	canonicalizeServiceEntities(canonicalEntities)
-	applyAliasProperties(canonicalEntities, aliasMap)
+	// Phase 4b: Domain-aware post-processing via the pluggable Canonicalizer.
+	log.Println("[4/14] Canonicalizing entities (role cleanup, status, aliases)...")
+	p.Canonicalizer.Canonicalize(canonicalEntities, aliasMap)
 
 	// Phase 5: Rewrite all edges to canonical entity names
 	log.Println("[5/14] Rewriting edges to canonical entities...")
@@ -149,7 +143,7 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 
 	// Materialize final KG
 	log.Println("Materializing to FalkorDB...")
-	if err := p.materializeFinalGraph(finalGraph, aliasMap); err != nil {
+	if err := p.materializeFinalGraph(finalGraph, aliasMap, canonicalEntities); err != nil {
 		return fmt.Errorf("materialization failed: %w", err)
 	}
 
@@ -456,31 +450,44 @@ func normalizeRelations(edges []models.CandidateEdge) []models.CandidateEdge {
 	return result
 }
 
-// materializeFinalGraph writes the final graph to FalkorDB.
-func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph, aliasMap map[string]string) error {
-	// Store entities
+// materializeFinalGraph writes the final graph to FalkorDB using batched
+// parameter-bound UNWIND queries instead of one MERGE per item. Same
+// shape ends up in the graph (Concept + typed label + edge with on-create
+// / on-match semantics) — just amortised across far fewer round-trips.
+//
+// canonicalEntities is needed for the MENTIONED_IN edges (entity → chunk)
+// that the lexical backbone defines: only the canonical entities carry the
+// per-chunk evidence trail the solver doesn't preserve on KGEntity.
+func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph, aliasMap map[string]string, canonicalEntities map[string]*models.CanonicalEntity) error {
+	// Track which canonical names actually got written; ALIAS_OF needs that
+	// to know where it's safe to point.
 	entitySet := make(map[string]bool, len(fg.Entities))
+
+	// --- Build entity rows ---
+	entRows := make([]entityRow, 0, len(fg.Entities))
 	for _, ent := range fg.Entities {
-		entitySet[strings.ToLower(strings.TrimSpace(ent.CanonicalName))] = true
-	}
-	for _, ent := range fg.Entities {
-		entity := models.Entity{
-			Name:       ent.CanonicalName,
-			Properties: map[string]interface{}{},
+		name := strings.ToLower(strings.TrimSpace(ent.CanonicalName))
+		if name == "" {
+			continue
 		}
+		entitySet[name] = true
+
+		props := map[string]interface{}{}
+		baseType := ""
 		if len(ent.BaseTypes) > 0 {
-			entity.BaseType = ent.BaseTypes[0]
-			entity.Type = ent.BaseTypes[0]
+			baseType = strings.ToLower(strings.TrimSpace(ent.BaseTypes[0]))
+		}
+		if baseType == "" {
+			baseType = "concept"
 		}
 		if len(ent.DomainTypes) > 0 {
-			entity.DomainType = ent.DomainTypes[0]
-			entity.Properties["domain_type"] = ent.DomainTypes[0]
+			props["domain_type"] = ent.DomainTypes[0]
 		}
 		if ent.Status != "" {
-			entity.Properties["status"] = ent.Status
+			props["status"] = ent.Status
 		}
 		if len(ent.FunctionalRoles) > 0 {
-			entity.Properties["functional_roles"] = strings.Join(ent.FunctionalRoles, ",")
+			props["functional_roles"] = strings.Join(ent.FunctionalRoles, ",")
 		}
 		if len(ent.Aliases) > 0 {
 			var aliasVals []string
@@ -493,43 +500,66 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph, aliasMap map[str
 				}
 			}
 			if len(aliasVals) > 0 {
-				entity.Properties["aliases"] = strings.Join(aliasVals, "|")
+				props["aliases"] = strings.Join(aliasVals, "|")
 			}
 		}
 		for k, v := range ent.Properties {
-			entity.Properties[k] = v
+			props[k] = v
 		}
-		if err := p.store.CreateEntity(entity); err != nil {
-			log.Printf("Warning: failed to store entity '%s': %v", ent.CanonicalName, err)
-		}
+		entRows = append(entRows, entityRow{
+			Name:       name,
+			Type:       baseType,
+			Properties: props,
+		})
 	}
+	writeEntitiesBatched(p.store, entRows)
 
-	// Store edges
+	// --- Build edge rows, grouped by relation type ---
+	edgeRowsByRel := map[string][]edgeRow{}
 	for _, edge := range fg.Edges {
+		rel := strings.TrimSpace(edge.RelationID)
+		if rel == "" {
+			continue
+		}
+		from := strings.ToLower(strings.TrimSpace(edge.From))
+		to := strings.ToLower(strings.TrimSpace(edge.To))
+		if from == "" || to == "" || from == to {
+			continue
+		}
 		evidence := ""
 		if len(edge.Evidence) > 0 {
 			evidence = edge.Evidence[0].Text
 		}
-		edgeRecord := models.EdgeRecord{
-			Node1:     edge.From,
-			Node2:     edge.To,
-			Edge:      edge.RelationID,
-			Weight:    edge.Weight,
-			ChunkIDs:  edge.ChunkIDs,
-			Evidence:  evidence,
-			Status:    edge.Status,
-			Condition: edge.Condition,
-			Temporal:  edge.Temporal,
+		temporal := map[string]interface{}{}
+		for k, v := range edge.Temporal {
+			key := sanitizePropertyKey(k)
+			if key == "" {
+				continue
+			}
+			val := strings.TrimSpace(v)
+			if val == "" {
+				continue
+			}
+			temporal[key] = val
 		}
-		if err := p.store.CreateEdge(edgeRecord); err != nil {
-			log.Printf("Warning: failed to store edge %s -[%s]-> %s: %v",
-				edge.From, edge.RelationID, edge.To, err)
-		}
+		edgeRowsByRel[rel] = append(edgeRowsByRel[rel], edgeRow{
+			From:        from,
+			To:          to,
+			Description: edge.RelationID,
+			Weight:      edge.Weight,
+			Inferred:    false,
+			ChunkIDs:    strings.Join(edge.ChunkIDs, ","),
+			Evidence:    evidence,
+			Status:      edge.Status,
+			Condition:   edge.Condition,
+			Temporal:    temporal,
+		})
+	}
+	for rel, rows := range edgeRowsByRel {
+		writeEdgesBatched(p.store, rows, rel)
 	}
 
-	// Materialize ALIAS_OF edges from the alias map so the query layer
-	// (rewriteQueryWithAliases) can resolve user phrasings to canonical
-	// entities. Aliases otherwise collapse to self-loops and are dropped.
+	// --- ALIAS_OF: map each surviving alias to its terminal canonical ---
 	resolveAlias := func(n string) string {
 		seen := map[string]bool{}
 		for {
@@ -541,38 +571,37 @@ func (p *Pipeline) materializeFinalGraph(fg *models.FinalGraph, aliasMap map[str
 			n = strings.ToLower(strings.TrimSpace(next))
 		}
 	}
-	aliasEdges := 0
+	var aliasRows []edgeRow
 	for alias := range aliasMap {
 		alias = strings.ToLower(strings.TrimSpace(alias))
 		canonical := resolveAlias(alias)
 		if alias == "" || canonical == "" || alias == canonical {
 			continue
 		}
-		// Canonical must be a real materialized entity.
 		if !entitySet[canonical] {
 			continue
 		}
-		// Don't demote a materialized entity into an alias node.
 		if entitySet[alias] {
+			// Don't demote a real materialised entity into an alias node.
 			continue
 		}
-		rec := models.EdgeRecord{
-			Node1:     alias,
-			Node1Type: "alias",
-			Node2:     canonical,
-			Edge:      "ALIAS_OF",
-			Weight:    1.0,
-			Status:    "active",
-		}
-		if err := p.store.CreateEdge(rec); err != nil {
-			log.Printf("Warning: failed to store alias edge %s -[ALIAS_OF]-> %s: %v", alias, canonical, err)
-			continue
-		}
-		aliasEdges++
+		aliasRows = append(aliasRows, edgeRow{
+			From:     alias,
+			To:       canonical,
+			FromType: "alias",
+			Weight:   1.0,
+			Status:   "active",
+		})
 	}
-	if aliasEdges > 0 {
-		log.Printf("  Materialized %d ALIAS_OF edges", aliasEdges)
+	if len(aliasRows) > 0 {
+		writeEdgesBatched(p.store, aliasRows, "ALIAS_OF")
 	}
+
+	// MENTIONED_IN edges: link each materialised :Concept to the :Chunk
+	// nodes it was extracted from. Provenance backbone — the thing that
+	// makes citations / per-document delete / chunk-level retrieval all
+	// possible. Skipped silently when the lexical backbone is disabled.
+	writeMentionedInEdges(p.store, canonicalEntities, entitySet)
 
 	return nil
 }
@@ -782,6 +811,42 @@ func resolveNegativeConflicts(edges []models.KGEdge) []models.KGEdge {
 	return result
 }
 
+// qualityFilter is the single named quality-filter phase. It drops:
+//   - entities flagged as raw values (dates/times/quantities — those belong
+//     on edges, not as standalone nodes)
+//   - entities with empty mention or canonical name
+//   - edges whose endpoints did not survive entity filtering
+//   - edges with an empty endpoint
+//
+// Mirrors GraphRAG-SDK's _filter_quality. Logs once per phase so the
+// pipeline output stays readable.
+func qualityFilter(g *models.CandidateGraph) *models.CandidateGraph {
+	preEnts := len(g.Entities)
+	keptEnts := make([]models.CandidateEntity, 0, preEnts)
+	for _, e := range g.Entities {
+		if isRawValueEntity(e) {
+			continue
+		}
+		if strings.TrimSpace(e.Mention) == "" && strings.TrimSpace(e.CanonicalName) == "" {
+			continue
+		}
+		keptEnts = append(keptEnts, e)
+	}
+
+	preEdges := len(g.Edges)
+	keptEdges := filterOrphanEdges(g.Edges, keptEnts)
+
+	droppedEnts := preEnts - len(keptEnts)
+	droppedEdges := preEdges - len(keptEdges)
+	if droppedEnts > 0 || droppedEdges > 0 {
+		log.Printf("  Quality filter: dropped %d entities, %d edges (kept %d / %d)",
+			droppedEnts, droppedEdges, len(keptEnts), len(keptEdges))
+	}
+	g.Entities = keptEnts
+	g.Edges = keptEdges
+	return g
+}
+
 // filterRawValueEntities removes entities that are raw values (dates, times, etc.)
 // and should be stored as edge properties instead.
 func filterRawValueEntities(entities []models.CandidateEntity) []models.CandidateEntity {
@@ -824,89 +889,6 @@ func containsStr(ss []string, s string) bool {
 		}
 	}
 	return false
-}
-
-// addSuffixAliasRules merges entities that differ only by a trailing suffix
-// like " branch", " clinic", " center", " office" when the shorter form also exists.
-// E.g., "cedargate jerusalem south branch" → "cedargate jerusalem south".
-//
-// Also handles short branch aliases: if a short name like "jerusalem south branch"
-// has all its non-suffix tokens contained in a longer canonical name like
-// "cedargate jerusalem south", map the short form to the longer canonical.
-func addSuffixAliasRules(entities []models.CandidateEntity, aliasMap map[string]string) {
-	existing := make(map[string]bool, len(entities))
-	for _, e := range entities {
-		name := strings.ToLower(strings.TrimSpace(e.CanonicalName))
-		if name == "" {
-			name = strings.ToLower(strings.TrimSpace(e.Mention))
-		}
-		existing[name] = true
-	}
-
-	suffixes := []string{" branch", " clinic", " center", " office", " site"}
-
-	// Pass 1: exact suffix stripping (original logic)
-	for name := range existing {
-		for _, suffix := range suffixes {
-			if strings.HasSuffix(name, suffix) {
-				shorter := strings.TrimSpace(strings.TrimSuffix(name, suffix))
-				if shorter != "" && existing[shorter] {
-					if _, already := aliasMap[name]; !already {
-						aliasMap[name] = shorter
-					}
-				}
-			}
-		}
-	}
-
-	// Pass 2: short branch alias → longer canonical
-	// For names ending with a suffix, strip the suffix to get core tokens,
-	// then find the longest existing canonical that contains ALL core tokens.
-	for name := range existing {
-		if _, already := aliasMap[name]; already {
-			continue // already mapped in pass 1
-		}
-		for _, suffix := range suffixes {
-			if !strings.HasSuffix(name, suffix) {
-				continue
-			}
-			core := strings.TrimSpace(strings.TrimSuffix(name, suffix))
-			if core == "" {
-				continue
-			}
-			coreTokens := strings.Fields(core)
-			if len(coreTokens) == 0 {
-				continue
-			}
-
-			// Find the longest canonical that contains all core tokens
-			var bestMatch string
-			for candidate := range existing {
-				if candidate == name {
-					continue
-				}
-				// Candidate must be longer (more specific)
-				if len(candidate) <= len(core) {
-					continue
-				}
-				// All core tokens must appear in the candidate
-				allFound := true
-				for _, tok := range coreTokens {
-					if !strings.Contains(candidate, tok) {
-						allFound = false
-						break
-					}
-				}
-				if allFound && (bestMatch == "" || len(candidate) > len(bestMatch)) {
-					bestMatch = candidate
-				}
-			}
-			if bestMatch != "" {
-				aliasMap[name] = bestMatch
-			}
-			break // only process first matching suffix
-		}
-	}
 }
 
 // containsAny checks if s contains any of the substrings.

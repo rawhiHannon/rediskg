@@ -437,13 +437,27 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Question string `json:"question"`
+		Human    *bool  `json:"human,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Question == "" {
 		writeError(w, http.StatusBadRequest, "provide 'question' in request body")
 		return
 	}
 
-	result, err := s.pipeline.Query(req.Question)
+	// Opt-in human answer: ?human=1 OR {"human": true}. Default off so
+	// agent callers don't pay for an extra LLM round-trip they don't need.
+	human := false
+	if req.Human != nil {
+		human = *req.Human
+	}
+	switch strings.ToLower(r.URL.Query().Get("human")) {
+	case "1", "true", "yes":
+		human = true
+	case "0", "false", "no":
+		human = false
+	}
+
+	result, err := s.pipeline.Query(req.Question, human)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -479,6 +493,7 @@ func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 		"result": result,
 	})
 }
+
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")

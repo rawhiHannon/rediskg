@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -38,67 +39,147 @@ func tokenize(s string) []string {
 	return toks
 }
 
-const answerPrompt = `You are a helpful assistant. Answer the user's question based ONLY on the knowledge graph data provided below. Be clear and concise.
+// nameLookupCues introduce a literal entity name in the question. The tokens
+// that follow them are the name the user is asking about.
+var nameLookupCues = []string{
+	"called ", "named ", "name is ", "name's ",
+	"anyone called ", "anybody called ", "any one called ",
+	"anyone named ", "anybody named ", "any one named ",
+	"who is ", "who's ", "is there a person called ", "is there someone called ",
+}
+
+// detectLookupName returns the asked-for name tokens when the question
+// explicitly looks up an entity by name ("called X", "named X", "who is X").
+// An empty result means no such pattern — fall back to general matching.
+//
+// This matters because if the user explicitly asks for "sara" and no node is
+// named Sara, the right answer is "no, nobody by that name" — not a list of
+// phonetically similar names from embedding similarity.
+func detectLookupName(q string) []string {
+	lower := strings.ToLower(q)
+	for _, cue := range nameLookupCues {
+		idx := strings.LastIndex(lower, cue)
+		if idx < 0 {
+			continue
+		}
+		rest := lower[idx+len(cue):]
+		toks := tokenize(rest)
+		if len(toks) == 0 {
+			continue
+		}
+		if len(toks) > 3 {
+			toks = toks[:3]
+		}
+		return toks
+	}
+	return nil
+}
+
+// answerPrompt explicitly asks for JSON because the shared LLM client is
+// configured with response_format=json_object, which OpenAI only accepts when
+// the prompt itself contains the word "json".
+const answerPrompt = `You are a helpful assistant. Answer the user's question based ONLY on the knowledge graph data provided below.
+
+Respond as a single JSON object with one key, "answer", whose value is the human-readable answer string. Example: {"answer": "Yes, Yara Haddad is a branch manager at CedarGate Karmiel Wellness Hub."}
 
 Rules:
 - Only use facts from the provided graph data. Do not make up information.
-- If the data is empty or doesn't contain the answer, say "I don't have enough information in the knowledge graph to answer this."
-- Format the answer as readable text. Use bullet points for lists.
+- If the data is empty or doesn't contain the answer, set "answer" to "I don't have enough information in the knowledge graph to answer this."
+- The "answer" value is plain text. You may use newlines and "- " for bullet points inside it.
 - The text may contain names in any language — preserve them as-is.
 - Respond in the same language as the question.`
 
-// Query takes a natural language question, fetches relevant subgraph, and returns a formatted answer.
-func (p *Pipeline) Query(question string) (*models.QueryResult, error) {
-	// Step 1: Extract entity names from the question
-	entities := p.findRelevantEntities(question)
+// Query takes a natural language question, fetches the relevant subgraph,
+// and returns the structured result. When withHumanAnswer is true an LLM
+// call is made to produce a natural-language Answer; otherwise the LLM is
+// skipped and callers (typically agents) get just the focused Graph and
+// raw Facts list — one extra LLM round-trip saved.
+func (p *Pipeline) Query(question string, withHumanAnswer bool) (*models.QueryResult, error) {
+	// Analytical/aggregation questions ("most/least/how many/count of …")
+	// can't be answered from a single entity's neighbourhood — they need a
+	// graph-wide query. Route them through the LLM-to-Cypher path first;
+	// fall back to multi-path retrieval only if it fails.
+	if isAnalyticalQuestion(question) {
+		if res, err := p.analyticalQuery(question, withHumanAnswer); err == nil {
+			return res, nil
+		} else {
+			log.Printf("Analytical path failed, falling back to multi-path: %v", err)
+		}
+	}
 
-	entityMaps := entitiesToMaps(entities)
+	// Multi-path retrieval — the GraphRAG-SDK 9-phase pipeline ported to
+	// our schema (typed edges + Concept entities). Pulls candidates from
+	// vector + Cypher CONTAINS + graph-walk paths, cosine-reranks, and
+	// hands the LLM one structured message.
+	mp, err := p.runMultiPath(question)
+	if err != nil {
+		log.Printf("multi-path retrieval failed: %v", err)
+		mp = &multiPathResult{} // graceful degradation: empty sections
+	}
 
-	if len(entities) == 0 {
+	// Visualisation subgraph — use the entities multi-path discovered.
+	entityNames := make([]string, 0, len(mp.Entities))
+	for _, e := range mp.Entities {
+		entityNames = append(entityNames, strings.ToLower(strings.TrimSpace(e.Name)))
+		if len(entityNames) >= 8 {
+			break
+		}
+	}
+	entityMaps := entitiesToMaps(entityNames)
+	var subgraph models.SubGraph
+	if len(entityNames) > 0 {
+		subgraph = p.fetchSubgraph(entityNames)
+	}
+
+	// No-entity case → direct "not found" answer (the multi-path retrieval
+	// found nothing). Use the lookup-name detector so name-lookup questions
+	// get a focused "no" instead of a generic miss message.
+	if len(entityNames) == 0 {
+		msg := ""
+		if withHumanAnswer {
+			if lookup := detectLookupName(question); len(lookup) > 0 {
+				msg = fmt.Sprintf("No, I couldn't find anyone or anything named %q in the knowledge graph.", strings.Join(lookup, " "))
+			} else {
+				msg = "I couldn't find any matching entities in the knowledge graph. Try using the exact name of a person, organization, or service."
+			}
+		}
 		return &models.QueryResult{
-			Answer:   "I couldn't find any matching entities in the knowledge graph. Try using the exact name of a person, organization, or service.",
+			Answer:   msg,
 			Entities: entityMaps,
 		}, nil
 	}
 
-	// Build the focused subgraph from the same neighborhood used to answer.
-	subgraph := p.fetchSubgraph(entities)
-
-	// Step 2: Fetch subgraph around those entities (1-2 hops)
-	var allFacts []string
-	var cypherQueries []string
-
-	for _, entity := range entities {
-		facts, cypher := p.fetchEntityFacts(entity)
-		allFacts = append(allFacts, facts...)
-		cypherQueries = append(cypherQueries, cypher...)
-	}
-
-	if len(allFacts) == 0 {
+	// Agent path: skip the LLM, return the structured payload directly.
+	if !withHumanAnswer {
 		return &models.QueryResult{
-			Answer:   fmt.Sprintf("Found entity '%s' but no relationships in the graph.", strings.Join(entities, "', '")),
 			Graph:    subgraph,
-			Cypher:   strings.Join(cypherQueries, "\n"),
+			Facts:    mp.flatFacts(),
 			Entities: entityMaps,
 		}, nil
 	}
 
-	// Step 3: Have LLM format the answer
-	factsText := strings.Join(allFacts, "\n")
-	userPrompt := fmt.Sprintf("Question: %s\n\nKnowledge graph facts:\n%s", question, factsText)
+	// Have the LLM compose a human answer from the structured sections.
+	context := mp.assembledContext()
+	if strings.TrimSpace(context) == "" {
+		context = "(no supporting evidence)"
+	}
+	userPrompt := fmt.Sprintf("Question: %s\n\nKnowledge graph context:\n%s", question, context)
 
 	answer, err := p.llmClient.Complete(answerPrompt, userPrompt)
 	if err != nil {
-		// Fall back to raw facts
+		// Don't dump raw triples at the user. Log the real error so it can
+		// be diagnosed, and return a polite message; the facts are still
+		// available on the structured result for the UI / agents to use.
+		log.Printf("Warning: LLM answer generation failed: %v", err)
 		return &models.QueryResult{
-			Answer:   factsText,
+			Answer:   "I found relevant information in the graph but couldn't generate a summary right now. The supporting facts and subgraph are available below.",
 			Graph:    subgraph,
-			Cypher:   strings.Join(cypherQueries, "\n"),
+			Facts:    mp.flatFacts(),
 			Entities: entityMaps,
 		}, nil
 	}
 
-	// Strip JSON wrapper if the LLM wraps it
+	// Strip JSON wrapper if the LLM wraps it.
 	var answerObj struct {
 		Answer string `json:"answer"`
 	}
@@ -109,13 +190,14 @@ func (p *Pipeline) Query(question string) (*models.QueryResult, error) {
 	return &models.QueryResult{
 		Answer:   answer,
 		Graph:    subgraph,
-		Cypher:   strings.Join(cypherQueries, "\n"),
+		Facts:    mp.flatFacts(),
 		Entities: entityMaps,
 	}, nil
 }
 
 // maxSubgraphNodes caps the focused subgraph so a question that lands on a
-// well-connected entity doesn't drag the whole graph into the response.
+// well-connected entity doesn't drag the whole graph into the response. The
+// cap applies only to neighborhood nodes; focus nodes are always kept.
 const maxSubgraphNodes = 60
 
 // fetchSubgraph builds the *focused* subgraph around the matched entities:
@@ -123,50 +205,65 @@ const maxSubgraphNodes = 60
 // edges incident to the focus nodes. It deliberately does NOT expand a second
 // hop — branches and the parent network are huge hubs, so 2 hops from any
 // person/service reaches almost the entire graph and stops being "focused".
+//
+// When the candidate 1-hop neighborhood is larger than the cap, edges are
+// admitted in descending weight order so the strongest relationships survive
+// the truncation. Edges between two focus nodes are always kept.
 func (p *Pipeline) fetchSubgraph(entities []string) models.SubGraph {
 	sg := models.SubGraph{Nodes: []models.GraphNode{}, Edges: []models.GraphEdge{}}
+
+	focusSet := map[string]bool{}
+	for _, e := range entities {
+		focusSet[strings.TrimSpace(e)] = true
+	}
 
 	nodeSeen := map[string]int{}  // node id -> index in sg.Nodes
 	edgeSeen := map[string]bool{} // "from|label|to"
 
-	addNode := func(name, typ string, focus bool) bool {
+	addNode := func(name, group string, force bool) bool {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return false
 		}
 		if idx, ok := nodeSeen[name]; ok {
-			if focus {
-				sg.Nodes[idx].Focus = true
-			}
-			if typ != "" && sg.Nodes[idx].Type == "" {
-				sg.Nodes[idx].Type = typ
+			// "focus" wins over a plain type label.
+			if group == "focus" {
+				sg.Nodes[idx].Group = "focus"
+			} else if sg.Nodes[idx].Group == "" {
+				sg.Nodes[idx].Group = group
 			}
 			return true
 		}
-		// Always admit focus nodes; cap only the neighborhood.
-		if !focus && len(sg.Nodes) >= maxSubgraphNodes {
+		if !force && len(sg.Nodes) >= maxSubgraphNodes {
 			return false
 		}
 		nodeSeen[name] = len(sg.Nodes)
-		sg.Nodes = append(sg.Nodes, models.GraphNode{ID: name, Label: name, Type: typ, Focus: focus})
+		sg.Nodes = append(sg.Nodes, models.GraphNode{ID: name, Label: name, Group: group})
 		return true
 	}
 
+	// Admit focus nodes first (always kept; force past the cap).
 	for _, entity := range entities {
-		addNode(entity, "", true)
+		addNode(entity, "focus", true)
 	}
+
+	// Gather every 1-hop edge incident to each focus entity, in both
+	// directions, so we can rank globally before truncating.
+	type cand struct {
+		from, label, to string
+		weight          float64
+		otherName       string // neighbor end relative to the focus entity
+		otherType       string
+	}
+	var cands []cand
 
 	for _, entity := range entities {
 		escaped := strings.ReplaceAll(strings.ReplaceAll(entity, `\`, `\\`), `'`, `\'`)
-
-		// 1-hop ego network only: the focus entity and its direct relations,
-		// in both directions. Every node shown is directly tied to something
-		// the user asked about.
-		edgeCypher := fmt.Sprintf(
-			`MATCH (n {name: '%s'})-[r]-(m) WHERE m.name IS NOT NULL RETURN DISTINCT startNode(r).name, type(r), endNode(r).name, r.weight, m.name, m.type LIMIT %d`,
-			escaped, maxSubgraphNodes,
+		cypher := fmt.Sprintf(
+			`MATCH (n {name: '%s'})-[r]-(m) WHERE m.name IS NOT NULL RETURN DISTINCT startNode(r).name, type(r), endNode(r).name, r.weight, m.name, m.type`,
+			escaped,
 		)
-		res, err := p.store.ROQuery(edgeCypher)
+		res, err := p.store.ROQuery(cypher)
 		if err != nil {
 			continue
 		}
@@ -183,31 +280,56 @@ func (p *Pipeline) fetchSubgraph(entities []string) models.SubGraph {
 			if !ok || len(cols) < 5 {
 				continue
 			}
-			from, _ := cols[0].(string)
-			label, _ := cols[1].(string)
-			to, _ := cols[2].(string)
-			weight := 1.0
+			c := cand{}
+			c.from, _ = cols[0].(string)
+			c.label, _ = cols[1].(string)
+			c.to, _ = cols[2].(string)
 			if w, ok := cols[3].(float64); ok {
-				weight = w
+				c.weight = w
+			} else {
+				c.weight = 1.0
 			}
-			mname, _ := cols[4].(string)
-			mtype := ""
+			c.otherName, _ = cols[4].(string)
 			if len(cols) >= 6 {
-				mtype, _ = cols[5].(string)
+				c.otherType, _ = cols[5].(string)
 			}
-			if !addNode(mname, mtype, false) {
-				continue // neighborhood cap reached; skip this neighbor + edge
-			}
-			if from == "" || to == "" {
+			if c.from == "" || c.to == "" {
 				continue
 			}
-			key := from + "|" + label + "|" + to
-			if edgeSeen[key] {
-				continue
-			}
-			edgeSeen[key] = true
-			sg.Edges = append(sg.Edges, models.GraphEdge{From: from, To: to, Label: label, Weight: weight})
+			cands = append(cands, c)
 		}
+	}
+
+	// Rank: focus-to-focus first (must keep), then by descending weight,
+	// then deterministic tie-break on names so the result is stable.
+	sort.SliceStable(cands, func(i, j int) bool {
+		fi := focusSet[cands[i].from] && focusSet[cands[i].to]
+		fj := focusSet[cands[j].from] && focusSet[cands[j].to]
+		if fi != fj {
+			return fi
+		}
+		if cands[i].weight != cands[j].weight {
+			return cands[i].weight > cands[j].weight
+		}
+		if cands[i].from != cands[j].from {
+			return cands[i].from < cands[j].from
+		}
+		return cands[i].to < cands[j].to
+	})
+
+	for _, c := range cands {
+		focusFocus := focusSet[c.from] && focusSet[c.to]
+		if !focusFocus {
+			if !addNode(c.otherName, c.otherType, false) {
+				continue // neighborhood cap reached; drop this lower-weight edge
+			}
+		}
+		key := c.from + "|" + c.label + "|" + c.to
+		if edgeSeen[key] {
+			continue
+		}
+		edgeSeen[key] = true
+		sg.Edges = append(sg.Edges, models.GraphEdge{From: c.from, To: c.to, Label: c.label, Weight: c.weight})
 	}
 
 	return sg
@@ -217,7 +339,18 @@ func (p *Pipeline) fetchSubgraph(entities []string) models.SubGraph {
 // Uses a two-phase approach: substring matching first, then vector similarity as fallback.
 func (p *Pipeline) findRelevantEntities(question string) []string {
 	q := strings.ToLower(question)
-	q = p.rewriteQueryWithAliases(q)
+
+	// Detect name lookup from the ORIGINAL phrasing. For "called X" / "named
+	// X" the user means literally X — we don't want an alias rewrite to
+	// silently swap "sara" for an alias target like "samira darwish".
+	lookupTokens := detectLookupName(q)
+
+	// Alias rewrite is a helpful expansion for general questions ("what does
+	// CGHN do?" -> cedargate health network), but for name lookups it can
+	// substitute the user's literal intent — so we skip it in that case.
+	if lookupTokens == nil {
+		q = p.rewriteQueryWithAliases(q)
+	}
 
 	// Get all node names
 	nodes, err := p.store.GetAllNodes()
@@ -247,6 +380,11 @@ func (p *Pipeline) findRelevantEntities(question string) []string {
 		}
 	}
 
+	// (lookupTokens was computed above from the original, pre-rewrite query.)
+	// When set, we only return EXACT name-token matches and refuse to fall
+	// through to embedding similarity — "no exact name match" is the correct
+	// answer to "is there anyone called sara?", not 5 phonetic neighbors.
+
 	// Phase 1: Exact substring matching (fast, precise)
 	var matches []string
 	for _, name := range names {
@@ -260,8 +398,16 @@ func (p *Pipeline) findRelevantEntities(question string) []string {
 	// to those nodes, so "is there anyone called yara?" -> "yara haddad"
 	// without falling through to broad embedding/fuzzy fallback.
 	if len(matches) == 0 {
+		// For a name-lookup ("called X"), match only against the asked-for
+		// name tokens — not every distinctive word in the question.
 		qTokens := map[string]bool{}
-		for _, t := range tokenize(q) {
+		var probe []string
+		if lookupTokens != nil {
+			probe = lookupTokens
+		} else {
+			probe = tokenize(q)
+		}
+		for _, t := range probe {
 			qTokens[t] = true
 		}
 		type scored struct {
@@ -293,6 +439,13 @@ func (p *Pipeline) findRelevantEntities(question string) []string {
 		for _, c := range cands {
 			matches = append(matches, c.name)
 		}
+	}
+
+	// Name-lookup short-circuit: the user named a specific entity. If we
+	// didn't find it by exact token, return zero so the caller reports
+	// "no such entity" instead of guessing with embeddings/fuzzy matches.
+	if lookupTokens != nil {
+		return dedupAndCap(matches, 5)
 	}
 
 	// Phase 2: If no substring matches, use embedding similarity
@@ -328,7 +481,11 @@ func (p *Pipeline) findRelevantEntities(question string) []string {
 		}
 	}
 
-	// Deduplicate and limit
+	return dedupAndCap(matches, 5)
+}
+
+// dedupAndCap returns the first `max` distinct values from matches, in order.
+func dedupAndCap(matches []string, max int) []string {
 	seen := map[string]bool{}
 	var unique []string
 	for _, m := range matches {
@@ -336,11 +493,10 @@ func (p *Pipeline) findRelevantEntities(question string) []string {
 			seen[m] = true
 			unique = append(unique, m)
 		}
-		if len(unique) >= 5 {
+		if len(unique) >= max {
 			break
 		}
 	}
-
 	return unique
 }
 
@@ -365,9 +521,15 @@ func (p *Pipeline) rewriteQueryWithAliases(question string) string {
 				if alias == "" || canonical == "" {
 					continue
 				}
-				if strings.Contains(rewritten, alias) {
-					rewritten = strings.ReplaceAll(rewritten, alias, canonical)
+				// Word-boundary replacement so an alias like "ed" can't
+				// eat into "named" / "called", and "sara" never substitutes
+				// inside "sarona".
+				pat := `(?i)(^|[^a-z0-9])` + regexp.QuoteMeta(alias) + `($|[^a-z0-9])`
+				re, rxErr := regexp.Compile(pat)
+				if rxErr != nil {
+					continue
 				}
+				rewritten = re.ReplaceAllString(rewritten, "${1}"+canonical+"${2}")
 			}
 		}
 	}
