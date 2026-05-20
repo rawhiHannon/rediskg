@@ -56,6 +56,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/document", s.handleDeleteDocument)
 	s.mux.HandleFunc("POST /api/finalize", s.handleFinalize)
 	s.mux.HandleFunc("GET /api/export", s.handleExport)
+	s.mux.HandleFunc("GET /api/pipeline/stats", s.handlePipelineStats)
+	s.mux.HandleFunc("GET /api/pipeline/events", s.handlePipelineSSE)
 	s.mux.HandleFunc("DELETE /api/graph", s.handleDeleteGraph)
 }
 
@@ -677,6 +679,83 @@ func (s *Server) handleFinalize(w http.ResponseWriter, r *http.Request) {
 		"nodes":  stats["nodes"],
 		"edges":  stats["edges"],
 	})
+}
+
+// handlePipelineStats returns the current or most recent pipeline telemetry as JSON.
+func (s *Server) handlePipelineStats(w http.ResponseWriter, r *http.Request) {
+	stats := s.pipeline.Stats()
+	if stats == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "idle", "message": "no pipeline run in progress or completed"})
+		return
+	}
+	data, err := stats.Snapshot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+}
+
+// handlePipelineSSE streams real-time pipeline progress via Server-Sent Events.
+// The client connects with EventSource and receives JSON events for each phase
+// transition until the pipeline completes or fails.
+func (s *Server) handlePipelineSSE(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	ch := s.pipeline.SubscribeStats()
+	if ch == nil {
+		// No active pipeline — send current stats as a single event and close
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		stats := s.pipeline.Stats()
+		if stats != nil {
+			data, _ := stats.Snapshot()
+			fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", data)
+		} else {
+			fmt.Fprintf(w, "event: idle\ndata: {\"status\":\"idle\"}\n\n")
+		}
+		flusher.Flush()
+		return
+	}
+	defer s.pipeline.UnsubscribeStats(ch)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	flusher.Flush()
+
+	// Send initial snapshot
+	if stats := s.pipeline.Stats(); stats != nil {
+		data, _ := stats.Snapshot()
+		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				// Pipeline finished, channel closed
+				fmt.Fprintf(w, "event: done\ndata: {\"status\":\"closed\"}\n\n")
+				flusher.Flush()
+				return
+			}
+			fmt.Fprintf(w, "event: progress\ndata: %s\n\n", msg)
+			flusher.Flush()
+		}
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

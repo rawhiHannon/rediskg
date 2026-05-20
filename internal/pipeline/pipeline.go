@@ -33,6 +33,10 @@ type Pipeline struct {
 	Extractor     Extractor
 	Reranker      Reranker
 	Coref         *CorefResolver // nil = disabled; set to enable pronoun resolution
+
+	// Telemetry — set during Ingest, nil when idle. Read via Stats/SubscribeStats.
+	stats *PipelineStats
+	statsMu sync.RWMutex
 }
 
 // New creates a new Pipeline with the default strategy implementations.
@@ -50,6 +54,33 @@ func New(cfg *config.Config, store *store.FalkorStore, llmClient *llm.Client) *P
 	p.Extractor = defaultExtractor{pipeline: p}
 	p.Reranker = defaultReranker{pipeline: p}
 	return p
+}
+
+// Stats returns the current pipeline telemetry (nil when idle).
+func (p *Pipeline) Stats() *PipelineStats {
+	p.statsMu.RLock()
+	defer p.statsMu.RUnlock()
+	return p.stats
+}
+
+// SubscribeStats returns a channel that receives JSON-encoded SSE events
+// for pipeline progress. If no pipeline is running, returns nil.
+func (p *Pipeline) SubscribeStats() chan []byte {
+	p.statsMu.RLock()
+	defer p.statsMu.RUnlock()
+	if p.stats == nil {
+		return nil
+	}
+	return p.stats.Subscribe()
+}
+
+// UnsubscribeStats removes a subscriber channel.
+func (p *Pipeline) UnsubscribeStats(ch chan []byte) {
+	p.statsMu.RLock()
+	defer p.statsMu.RUnlock()
+	if p.stats != nil {
+		p.stats.Unsubscribe(ch)
+	}
 }
 
 // selectChunker returns the appropriate Chunker based on cfg.ChunkStrategy.

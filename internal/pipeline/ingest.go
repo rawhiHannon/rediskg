@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"rediskg/internal/llm"
 	"rediskg/internal/loader"
@@ -30,152 +31,214 @@ import (
 func (p *Pipeline) Ingest(docs []*models.Document) error {
 	log.Println("Starting ingestion pipeline...")
 
-	// Phase 0: SHA-256 short-circuit — skip docs whose stored content_hash
-	// already matches. (Idempotent re-ingest pattern lifted from GraphRAG-SDK.)
+	// Initialize telemetry
+	runID := fmt.Sprintf("ingest_%d", time.Now().UnixMilli())
+	tel := NewPipelineStats(runID)
+	p.statsMu.Lock()
+	p.stats = tel
+	p.statsMu.Unlock()
+	defer func() {
+		if tel.Status == PhaseRunning {
+			tel.Fail("pipeline exited unexpectedly")
+		}
+	}()
+
+	// Phase 0: SHA-256 short-circuit
+	tel.StartPhase("Content-hash dedup")
+	tel.SetCounts(func(c *StatCounts) { c.Documents = len(docs) })
 	docs = filterUnchangedDocs(p.store, docs)
 	if len(docs) == 0 {
 		log.Println("All documents unchanged, nothing to ingest")
+		tel.EndPhase("all documents unchanged")
+		tel.Complete()
 		return nil
 	}
+	tel.SetCounts(func(c *StatCounts) { c.Documents = len(docs) })
+	tel.EndPhase(fmt.Sprintf("%d documents to process", len(docs)))
 
-	// Phase 1: Chunk documents (via the pluggable Chunker strategy).
+	// Phase 1: Chunk documents
+	tel.StartPhase("Chunking documents")
 	log.Println("[1/10] Chunking documents...")
 	chunks := p.Chunker.ChunkDocuments(docs, p.cfg.ChunkSize, p.cfg.ChunkOverlap)
 	log.Printf("  Created %d chunks", len(chunks))
+	tel.SetCounts(func(c *StatCounts) { c.Chunks = len(chunks) })
+	tel.EndPhase(fmt.Sprintf("%d chunks", len(chunks)))
 
-	// Phase 1c: Coreference resolution — replace pronouns with entity names
-	// before extraction so "he", "it", "the company" are resolved to actual
-	// entity names. Uses LLM per-chunk (bounded by Workers).
+	// Phase 1c: Coreference resolution
 	if p.Coref != nil {
+		tel.StartPhase("Coreference resolution")
 		log.Println("[1c] Resolving coreferences...")
 		chunks = p.Coref.ResolveCoref(chunks)
+		tel.EndPhase(fmt.Sprintf("%d chunks processed", len(chunks)))
+	} else {
+		tel.SkipPhase("Coreference resolution", "disabled")
 	}
 
-	// Phase 1b: Lexical backbone — Document + Chunk + PART_OF + NEXT_CHUNK.
-	// Written upfront so MENTIONED_IN edges (later) can MATCH the Chunk
-	// nodes by id. Tagged separately from entities (:Concept) so it
-	// doesn't pollute entity-level queries.
+	// Phase 1b: Lexical backbone
+	tel.StartPhase("Lexical backbone")
 	writeLexicalBackbone(p.store, docs, chunks)
+	tel.EndPhase("Document/Chunk/PART_OF/NEXT_CHUNK written")
 
-	// Phase 2: Extract candidates (schema-constrained)
+	// Phase 2: Extract candidates
+	tel.StartPhase("Entity & relation extraction")
 	log.Println("[2/10] Extracting candidates (schema-constrained)...")
 	candidateGraph := p.Extractor.Extract(chunks, p.cfg.Workers)
 	log.Printf("  Extracted %d entity candidates, %d edge candidates",
 		len(candidateGraph.Entities), len(candidateGraph.Edges))
+	tel.SetCounts(func(c *StatCounts) {
+		c.EntitiesExtracted = len(candidateGraph.Entities)
+		c.EdgesExtracted = len(candidateGraph.Edges)
+	})
+	tel.EndPhase(fmt.Sprintf("%d entities, %d edges", len(candidateGraph.Entities), len(candidateGraph.Edges)))
 
 	if len(candidateGraph.Entities) == 0 {
+		tel.Fail("no entities extracted")
 		return fmt.Errorf("no entities extracted from documents")
 	}
 
-	// Phase 2b: Quality filter — one named phase that drops raw value
-	// entities (dates/times/quantities), entities with empty ID/label, and
-	// any edge whose endpoints were filtered. Same intent as upstream
-	// GraphRAG-SDK's _filter_quality step, just applied to our candidate
-	// graph shape.
+	// Phase 2b: Quality filter
+	tel.StartPhase("Quality filtering")
 	candidateGraph = qualityFilter(candidateGraph)
+	tel.EndPhase(fmt.Sprintf("%d entities, %d edges after filter", len(candidateGraph.Entities), len(candidateGraph.Edges)))
 
-	// Phases 3-4: Resolve candidates → canonical entities via the pluggable
-	// Resolver strategy (default builds an alias map + selects canonicals).
+	// Phases 3-4: Resolve candidates → canonical entities
+	tel.StartPhase("Entity resolution")
 	log.Println("[3/14] Resolving canonical entities...")
 	canonicalEntities, aliasMap := p.Resolver.Resolve(candidateGraph.Entities)
 	log.Printf("  %d canonical entities, %d alias mappings", len(canonicalEntities), len(aliasMap))
+	tel.SetCounts(func(c *StatCounts) {
+		c.EntitiesCanonical = len(canonicalEntities)
+		c.AliasMappings = len(aliasMap)
+	})
+	tel.EndPhase(fmt.Sprintf("%d canonical, %d aliases", len(canonicalEntities), len(aliasMap)))
 
-	// Phase 4b: Domain-aware post-processing via the pluggable Canonicalizer.
+	// Phase 4b: Canonicalization
+	tel.StartPhase("Canonicalization")
 	log.Println("[4/14] Canonicalizing entities (role cleanup, status, aliases)...")
 	p.Canonicalizer.Canonicalize(canonicalEntities, aliasMap)
+	tel.EndPhase("role cleanup, status fix, alias propagation")
 
-	// Phase 5: Rewrite all edges to canonical entity names
+	// Phase 5: Rewrite edges
+	tel.StartPhase("Edge rewriting")
 	log.Println("[5/14] Rewriting edges to canonical entities...")
 	candidateGraph.Edges = rewriteEdgesToCanonical(candidateGraph.Edges, aliasMap)
+	tel.EndPhase(fmt.Sprintf("%d edges rewritten", len(candidateGraph.Edges)))
 
-	// Phase 6: Normalize relation names to stable internal IDs
+	// Phase 6: Normalize relations
+	tel.StartPhase("Relation normalization")
 	log.Println("[6/14] Normalizing relations...")
 	candidateGraph.Edges = normalizeRelations(candidateGraph.Edges)
 	log.Printf("  %d edges after normalization", len(candidateGraph.Edges))
+	tel.EndPhase(fmt.Sprintf("%d edges", len(candidateGraph.Edges)))
 
-	// Phase 7: Deterministic negation fix (evidence-based relation correction)
+	// Phase 7: Negation fix
+	tel.StartPhase("Negation fixing")
 	log.Println("[7/14] Fixing negated relations from evidence...")
 	candidateGraph.Edges = fixNegatedRelations(candidateGraph.Edges)
+	tel.EndPhase("")
 
-	// Phase 8: Deterministic conditional annotation (evidence-based status/condition)
+	// Phase 8: Conditional annotation
+	tel.StartPhase("Conditional annotation")
 	log.Println("[8/14] Annotating conditional edges from evidence...")
 	candidateGraph.Edges = annotateConditionalEdges(candidateGraph.Edges)
+	tel.EndPhase("")
 
-	// Phase 9: Status-aware edge rewriting
+	// Phase 9: Status-aware rewriting
+	tel.StartPhase("Status-aware edge rewriting")
 	log.Println("[9/14] Rewriting status-aware edges...")
 	preRewrite := len(candidateGraph.Edges)
 	candidateGraph.Edges = rewriteStatusAwareEdges(candidateGraph.Edges, canonicalEntities)
 	candidateGraph.Edges = fixPlannedServiceMisuse(candidateGraph.Edges, canonicalEntities)
 	log.Printf("  Status rewriting: %d -> %d edges", preRewrite, len(candidateGraph.Edges))
-
-	// Phase 9b: Deterministic HAS_BRANCH completion for known networks
 	preBranch := len(candidateGraph.Edges)
 	candidateGraph.Edges = completeBranchEdges(candidateGraph.Edges, canonicalEntities)
 	if len(candidateGraph.Edges) != preBranch {
 		log.Printf("  Branch completion: %d -> %d edges", preBranch, len(candidateGraph.Edges))
 	}
+	tel.EndPhase(fmt.Sprintf("%d -> %d edges", preRewrite, len(candidateGraph.Edges)))
 
-	// Phase 10: Build alternative/conflict groups
+	// Phase 10: Alternative groups
+	tel.StartPhase("Alternative group building")
 	log.Println("[10/14] Building alternative groups...")
 	candidateGraph.Edges = solver.BuildAlternativeGroups(candidateGraph.Edges)
+	tel.EndPhase("")
 
-	// Phase 11: Apply hard constraints
+	// Phase 11: Hard constraints
+	tel.StartPhase("Hard constraints")
 	log.Println("[11/14] Applying hard constraints...")
 	preCount := len(candidateGraph.Edges)
 	candidateGraph.Edges = solver.ApplyHardConstraints(
 		candidateGraph.Edges, canonicalEntities, aliasMap,
 	)
 	log.Printf("  Hard constraints: %d -> %d edges", preCount, len(candidateGraph.Edges))
+	tel.EndPhase(fmt.Sprintf("%d -> %d edges", preCount, len(candidateGraph.Edges)))
 
 	// Phase 12: Global graph selection
+	tel.StartPhase("Global graph selection")
 	log.Println("[12/14] Running global graph selector...")
 	finalGraph := solver.SelectFinalGraph(candidateGraph.Edges, canonicalEntities)
 	log.Printf("  Final graph: %d entities, %d edges",
 		len(finalGraph.Entities), len(finalGraph.Edges))
+	tel.SetCounts(func(c *StatCounts) {
+		c.EdgesAfterSolver = len(finalGraph.Edges)
+	})
+	tel.EndPhase(fmt.Sprintf("%d entities, %d edges", len(finalGraph.Entities), len(finalGraph.Edges)))
 
 	// Phase 13: Post-solver validation
+	tel.StartPhase("Post-solver validation")
 	log.Println("[13/14] Post-solver validation...")
 	finalGraph = postSolverValidation(finalGraph, aliasMap)
 	log.Printf("  After validation: %d entities, %d edges",
 		len(finalGraph.Entities), len(finalGraph.Edges))
+	tel.EndPhase(fmt.Sprintf("%d entities, %d edges", len(finalGraph.Entities), len(finalGraph.Edges)))
 
-	// Phase 14: Negative-fact conflict resolution
+	// Phase 14: Conflict resolution + inverses + temporal
+	tel.StartPhase("Conflict resolution & enrichment")
 	log.Println("[14/14] Resolving negative-fact conflicts...")
 	preConflict := len(finalGraph.Edges)
 	finalGraph.Edges = resolveNegativeConflicts(finalGraph.Edges)
 	log.Printf("  Conflict resolution: %d -> %d edges", preConflict, len(finalGraph.Edges))
 	propagateAddressStatuses(finalGraph)
-
-	// Phase 14b: Inverse-structure derivation. HAS_BRANCH and PART_OF are
-	// inverse expressions of the same fact (parent↔branch). When the LLM
-	// only extracted one direction, fill in the other so both queries
-	// `MATCH (parent)-[:HAS_BRANCH]->()` and `MATCH ()-[:PART_OF]->(parent)`
-	// work. Runs after the solver so the synthetic edges never compete.
 	preInverse := len(finalGraph.Edges)
 	finalGraph.Edges = deriveStructureInverses(finalGraph.Edges)
 	if added := len(finalGraph.Edges) - preInverse; added > 0 {
 		log.Printf("  Derived %d inverse structure edges", added)
 	}
-
-	// Phase 14c: Deterministic temporal extraction from evidence
 	log.Println("Extracting temporal facts from evidence...")
 	extractTemporalFacts(finalGraph)
+	tel.SetCounts(func(c *StatCounts) {
+		c.FinalEntities = len(finalGraph.Entities)
+		c.FinalEdges = len(finalGraph.Edges)
+	})
+	tel.EndPhase(fmt.Sprintf("%d entities, %d edges final", len(finalGraph.Entities), len(finalGraph.Edges)))
 
-	// Materialize final KG
+	// Materialize
+	tel.StartPhase("Materialization")
 	log.Println("Materializing to FalkorDB...")
 	if err := p.materializeFinalGraph(finalGraph, aliasMap, canonicalEntities); err != nil {
+		tel.Fail(fmt.Sprintf("materialization failed: %v", err))
 		return fmt.Errorf("materialization failed: %w", err)
 	}
+	tel.EndPhase("written to FalkorDB")
 
 	// Embeddings
+	tel.StartPhase("Embedding generation")
 	log.Println("Generating embeddings...")
 	if err := p.generateEmbeddings(); err != nil {
 		log.Printf("Warning: embedding generation failed: %v", err)
+		tel.EndPhase(fmt.Sprintf("warning: %v", err))
+	} else {
+		tel.EndPhase("entity + chunk + edge embeddings done")
 	}
 
-	stats, _ := p.store.GetGraphStats()
-	log.Printf("Done! Graph has %d nodes and %d edges", stats["nodes"], stats["edges"])
+	graphStats, _ := p.store.GetGraphStats()
+	tel.SetCounts(func(c *StatCounts) {
+		c.GraphNodes = int(graphStats["nodes"])
+		c.GraphEdges = int(graphStats["edges"])
+	})
+	log.Printf("Done! Graph has %d nodes and %d edges", graphStats["nodes"], graphStats["edges"])
 
+	tel.Complete()
 	return nil
 }
 
