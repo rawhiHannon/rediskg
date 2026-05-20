@@ -133,9 +133,22 @@ Ingest text or a file into the knowledge graph.
 | `text` | string | one of `text` or `path` | Raw text content to ingest |
 | `source` | string | no | Source label for the document |
 | `path` | string | one of `text` or `path` | Server-local file or directory path |
+| `extraction_strategy` | string | no | `"llm"` (default) or `"hybrid"` (local NER + LLM) |
+| `ner_service_url` | string | no | NER service URL when using hybrid strategy |
 
 ```json
 {"text": "Acme Corp was founded in 1985 by Jane Doe.", "source": "acme-overview"}
+```
+
+With hybrid extraction:
+
+```json
+{
+  "text": "Acme Corp was founded in 1985 by Jane Doe.",
+  "source": "acme-overview",
+  "extraction_strategy": "hybrid",
+  "ner_service_url": "http://localhost:9000"
+}
 ```
 
 **Response:**
@@ -398,6 +411,38 @@ Server-Sent Events stream for real-time pipeline progress.
 See [Telemetry](telemetry.md) for event types and usage.
 
 **Events:** `snapshot`, `progress`, `done`.
+
+---
+
+### GET /api/settings
+
+Return the current server configuration settings.
+
+**Response:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `extraction_strategy` | string | Current extraction strategy (`"llm"` or `"hybrid"`) |
+| `ner_service_url` | string | NER service URL (for hybrid strategy) |
+| `chunk_strategy` | string | Current chunking strategy |
+| `llm_provider` | string | LLM provider name |
+| `llm_model` | string | LLM model name |
+| `workers` | int | Concurrent worker count |
+| `chunk_size` | int | Chunk size in characters |
+| `chunk_overlap` | int | Chunk overlap in characters |
+
+```json
+{
+  "extraction_strategy": "hybrid",
+  "ner_service_url": "http://localhost:9000",
+  "chunk_strategy": "recursive",
+  "llm_provider": "openai",
+  "llm_model": "gpt-5.2",
+  "workers": 8,
+  "chunk_size": 1500,
+  "chunk_overlap": 150
+}
+```
 
 ---
 

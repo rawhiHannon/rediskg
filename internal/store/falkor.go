@@ -230,12 +230,12 @@ func (s *FalkorStore) CreateEdge(record models.EdgeRecord) error {
 		 ON CREATE SET b.name = '%s'%s
 		 MERGE (a)-[r:%s]->(b)
 		 ON CREATE SET r.description = '%s', r.weight = %f, r.inferred = %t, r.chunk_ids = '%s'%s
-		 ON MATCH SET r.weight = r.weight + %f, r.chunk_ids = r.chunk_ids + ',%s'%s`,
+		 ON MATCH SET r.weight = r.weight + %f%s%s`,
 		n1, n1,
 		n2, n2, typeSetClause,
 		edgeType, edgeDesc,
 		record.Weight, record.Inferred, strings.Join(record.ChunkIDs, ","), extraCreate,
-		record.Weight, strings.Join(record.ChunkIDs, ","), extraMatch,
+		record.Weight, chunkIDUnionClause(record.ChunkIDs), extraMatch,
 	)
 
 	_, err := s.Query(cypher)
@@ -651,6 +651,31 @@ func safeString(v interface{}) string {
 // Close closes the Redis connection.
 func (s *FalkorStore) Close() error {
 	return s.client.Close()
+}
+
+// chunkIDUnionClause builds a Cypher ON MATCH SET fragment that appends each
+// new chunk ID only if it isn't already present in r.chunk_ids. This prevents
+// duplicate chunk IDs from accumulating across repeated MERGE operations.
+func chunkIDUnionClause(chunkIDs []string) string {
+	if len(chunkIDs) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, cid := range chunkIDs {
+		ec := escapeCypher(strings.TrimSpace(cid))
+		if ec == "" {
+			continue
+		}
+		// Append only if not already contained in the existing chunk_ids string
+		parts = append(parts, fmt.Sprintf(
+			"r.chunk_ids = CASE WHEN r.chunk_ids IS NULL OR r.chunk_ids = '' THEN '%s' WHEN r.chunk_ids CONTAINS '%s' THEN r.chunk_ids ELSE r.chunk_ids + ',%s' END",
+			ec, ec, ec,
+		))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ", " + strings.Join(parts, ", ")
 }
 
 // escapeCypher escapes single quotes and semicolons for Cypher strings.

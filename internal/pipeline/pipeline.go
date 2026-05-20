@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"rediskg/internal/chunker"
 	"rediskg/internal/llm"
@@ -51,9 +52,22 @@ func New(cfg *config.Config, store *store.FalkorStore, llmClient *llm.Client) *P
 		Canonicalizer: defaultCanonicalizer{},
 		Coref:         &CorefResolver{LLM: llmClient, Workers: cfg.Workers},
 	}
-	p.Extractor = defaultExtractor{pipeline: p}
+	p.Extractor = selectExtractor(cfg, p)
 	p.Reranker = defaultReranker{pipeline: p}
 	return p
+}
+
+// SetExtractor switches the extraction strategy at runtime (e.g. per-request).
+func (p *Pipeline) SetExtractor(strategy, nerURL string) {
+	switch strategy {
+	case "hybrid":
+		if nerURL == "" {
+			nerURL = "http://localhost:9000"
+		}
+		p.Extractor = NewHybridExtractor(p, nerURL)
+	default:
+		p.Extractor = defaultExtractor{pipeline: p}
+	}
 }
 
 // Stats returns the current pipeline telemetry (nil when idle).
@@ -112,6 +126,21 @@ func selectChunker(cfg *config.Config, llmClient *llm.Client) Chunker {
 		}
 	default:
 		return defaultChunker{}
+	}
+}
+
+// selectExtractor picks the extraction strategy based on config.
+func selectExtractor(cfg *config.Config, p *Pipeline) Extractor {
+	switch cfg.ExtractionStrategy {
+	case "hybrid":
+		url := cfg.NERServiceURL
+		if url == "" {
+			url = "http://localhost:9000"
+		}
+		log.Printf("Using hybrid extraction (NER service: %s)", url)
+		return NewHybridExtractor(p, url)
+	default:
+		return defaultExtractor{pipeline: p}
 	}
 }
 
@@ -187,7 +216,7 @@ func (p *Pipeline) embedConceptNames() error {
 		go func(name string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			embedding, err := p.llmClient.Embed(name)
+			embedding, err := embedWithRetry(func() ([]float32, error) { return p.llmClient.Embed(name) })
 			if err != nil {
 				log.Printf("Warning: embed entity %q: %v", name, err)
 				return
@@ -245,7 +274,7 @@ func (p *Pipeline) embedChunks() error {
 		go func(id, text string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			embedding, err := p.llmClient.Embed(text)
+			embedding, err := embedWithRetry(func() ([]float32, error) { return p.llmClient.Embed(text) })
 			if err != nil {
 				log.Printf("Warning: embed chunk %s: %v", id, err)
 				return
@@ -347,7 +376,7 @@ func (p *Pipeline) embedEdgeFacts(dim int) error {
 			go func(relID int64, fact string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				embedding, err := p.llmClient.Embed(fact)
+				embedding, err := embedWithRetry(func() ([]float32, error) { return p.llmClient.Embed(fact) })
 				if err != nil {
 					log.Printf("Warning: embed %s fact id=%d: %v", rt, relID, err)
 					return
@@ -369,6 +398,22 @@ func (p *Pipeline) embedEdgeFacts(dim int) error {
 	}
 	log.Printf("  Edge facts embedded: %d across %d relation type(s)", totalEmbedded, len(relTypes))
 	return nil
+}
+
+// embedWithRetry retries an embedding call up to 3 times with exponential
+// backoff (1s, 2s, 4s). This prevents a single transient API error from
+// silently dropping an entity/chunk embedding.
+func embedWithRetry(fn func() ([]float32, error)) ([]float32, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		vec, err := fn()
+		if err == nil {
+			return vec, nil
+		}
+		lastErr = err
+		time.Sleep(time.Duration(1<<uint(attempt)) * time.Second)
+	}
+	return nil, lastErr
 }
 
 // float32SliceToVecStr formats a []float32 as the Cypher vecf32 argument

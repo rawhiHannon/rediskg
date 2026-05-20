@@ -30,8 +30,6 @@ import (
 //   9. Question-type hint + structured-sections assembly
 //
 // Differences from upstream:
-//   - No fulltext indexes — Path A of upstream entity discovery and chunk
-//     retrieval is replaced by Cypher CONTAINS (their pass a2 strategy).
 //   - Our edges are typed individually (not :RELATES with rel_type prop), so
 //     edge-vector search iterates relation-type indexes via FindSimilarEdgeFacts.
 //   - Analytical (LLM-to-Cypher) is the auto-triggered analyticalQuery path

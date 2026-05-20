@@ -8,6 +8,7 @@ A Go microservice and CLI for building production-quality knowledge graphs from 
 - **Multi-path retrieval** with 6 retrieval signals: fulltext, vector, edge-fact vector, MENTIONED_IN traversal, 2-hop expansion
 - **Dynamic schema governance** -- three-layer trust model (base types, candidate types, accepted types) with LLM-assisted approval
 - **5 pluggable strategy interfaces** -- Chunker, Resolver, Canonicalizer, Extractor, Reranker
+- **2 extraction strategies** -- LLM-only (2-pass, highest quality) or Hybrid NER+LLM (local GLiNER/spaCy + LLM, 50% fewer API calls)
 - **4 chunking strategies** -- recursive character, sentence-boundary, structural/heading, contextual (LLM-prefixed)
 - **3-tier entity resolution** -- exact match, semantic cosine similarity, LLM verification with Union-Find clustering
 - **Typed relationship edges** -- native Cypher pattern matching (`MATCH (a)-[:MANAGES]->(b)`) with per-relation-type vector indexes
@@ -53,6 +54,19 @@ export OPENAI_API_KEY=sk-...
 # Ingest with custom settings
 ./rediskg --llm claude --claude-key sk-ant-... --chunk-strategy sentence ingest ./data/
 ```
+
+### Hybrid NER Extraction (optional, saves ~50% LLM costs)
+
+```bash
+# 1. Start the NER service (GLiNER or spaCy)
+pip install flask gliner
+python scripts/ner_service.py --port 9000 --backend gliner
+
+# 2. Ingest with hybrid strategy
+./rediskg --extraction-strategy hybrid --ner-url http://localhost:9000 ingest ./data/
+```
+
+The hybrid strategy uses a local NER model for entity extraction (free, fast), then sends only the verification + relationship extraction to the LLM. The web UI also has a dropdown to switch strategies per-ingest.
 
 ### Query
 
@@ -155,6 +169,8 @@ FalkorDB (graph + vector + fulltext indexes)
 | `--chunk-size` | `1500` | Chunk size in characters |
 | `--chunk-overlap` | `150` | Overlap between chunks |
 | `--chunk-strategy` | `recursive` | Chunking strategy (recursive, sentence, structural, contextual) |
+| `--extraction-strategy` | `llm` | Extraction strategy: `llm` (2-pass LLM) or `hybrid` (local NER + LLM) |
+| `--ner-url` | `http://localhost:9000` | NER service URL for hybrid extraction |
 
 Environment variables: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`
 

@@ -59,6 +59,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/pipeline/stats", s.handlePipelineStats)
 	s.mux.HandleFunc("GET /api/pipeline/events", s.handlePipelineSSE)
 	s.mux.HandleFunc("DELETE /api/graph", s.handleDeleteGraph)
+	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 }
 
 // Start starts the HTTP server.
@@ -484,13 +485,31 @@ func (s *Server) handleGetStats(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Text   string `json:"text"`
-		Path   string `json:"path"`
-		Source string `json:"source"`
+		Text               string `json:"text"`
+		Path               string `json:"path"`
+		Source             string `json:"source"`
+		ExtractionStrategy string `json:"extraction_strategy,omitempty"` // "llm" or "hybrid"
+		NERServiceURL      string `json:"ner_service_url,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
+	}
+
+	// Apply per-request extraction strategy override
+	if req.ExtractionStrategy != "" && req.ExtractionStrategy != s.cfg.ExtractionStrategy {
+		origStrategy := s.cfg.ExtractionStrategy
+		origNERURL := s.cfg.NERServiceURL
+		s.cfg.ExtractionStrategy = req.ExtractionStrategy
+		if req.NERServiceURL != "" {
+			s.cfg.NERServiceURL = req.NERServiceURL
+		}
+		s.pipeline.SetExtractor(req.ExtractionStrategy, req.NERServiceURL)
+		defer func() {
+			s.cfg.ExtractionStrategy = origStrategy
+			s.cfg.NERServiceURL = origNERURL
+			s.pipeline.SetExtractor(origStrategy, origNERURL)
+		}()
 	}
 
 	if req.Path != "" {
@@ -756,6 +775,19 @@ func (s *Server) handlePipelineSSE(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"extraction_strategy": s.cfg.ExtractionStrategy,
+		"ner_service_url":     s.cfg.NERServiceURL,
+		"chunk_strategy":      s.cfg.ChunkStrategy,
+		"llm_provider":        s.cfg.LLMProvider,
+		"llm_model":           s.cfg.LLMModel,
+		"workers":             s.cfg.Workers,
+		"chunk_size":          s.cfg.ChunkSize,
+		"chunk_overlap":       s.cfg.ChunkOverlap,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

@@ -385,6 +385,42 @@ func verifyAndExtractRelations(client *Client, text, chunkID string, ners []mode
 	return entities, edges, nil
 }
 
+// ── Hybrid NER → LLM verify ──────────────────────────────────────
+
+// VerifyAndExtractFromNER runs only the verify+relations LLM pass using
+// entity spans from an external NER service (GLiNER, spaCy, etc.) instead
+// of a prior LLM NER pass. This cuts LLM calls in half per chunk.
+//
+// nerEntitiesJSON should be a JSON string of [{mention, base_type, ner_label, ...}].
+func VerifyAndExtractFromNER(client *Client, text, chunkID string, nerEntitiesJSON string) ([]models.CandidateEntity, []models.CandidateEdge, error) {
+	userPrompt := fmt.Sprintf(
+		"## PRE-EXTRACTED ENTITIES (from local NER model — verify and enrich these):\n%s\n\n## TEXT CHUNK:\n```%s```",
+		nerEntitiesJSON, text,
+	)
+	resp, err := client.Complete(VerifyAndExtractSystemPrompt(), userPrompt)
+	if err != nil {
+		return nil, nil, fmt.Errorf("hybrid verify+extract call: %w", err)
+	}
+	var parsed verifyJSON
+	if err := json.Unmarshal([]byte(resp), &parsed); err != nil {
+		log.Printf("Warning: hybrid verify+extract JSON parse failed for chunk %s: %v\n  response: %.200s", chunkID, err, resp)
+		return nil, nil, nil
+	}
+	entities := make([]models.CandidateEntity, 0, len(parsed.Entities))
+	for _, e := range parsed.Entities {
+		if ce, ok := toCandidateEntity(e, chunkID); ok {
+			entities = append(entities, ce)
+		}
+	}
+	edges := make([]models.CandidateEdge, 0, len(parsed.Relationships))
+	for i, r := range parsed.Relationships {
+		if ed, ok := toCandidateEdge(r, chunkID, i); ok {
+			edges = append(edges, ed)
+		}
+	}
+	return entities, edges, nil
+}
+
 // ── Orchestrator ─────────────────────────────────────────────────
 
 // ExtractWithSchema runs the two-pass extraction strategy adapted from

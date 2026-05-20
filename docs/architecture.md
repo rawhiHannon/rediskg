@@ -38,10 +38,13 @@ vector database.
 
 3. **Pluggable strategies.** Five interface slots -- Chunker, Resolver,
    Canonicalizer, Extractor, Reranker -- can be swapped after construction
-   without touching pipeline internals.
+   without touching pipeline internals. Two built-in extraction strategies:
+   LLM-only (2-pass, highest quality) and Hybrid NER+LLM (local NER model +
+   1 LLM pass, 50% fewer API calls).
 
 4. **Single binary deployment.** Pure Go. No Python, no subprocess calls, no
    ONNX runtime. LLM calls go over HTTP to OpenAI, Claude, Gemini, or Ollama.
+   The optional NER service for hybrid extraction runs as a separate sidecar.
 
 5. **Unified graph + vector store.** FalkorDB handles property-graph queries
    AND vector similarity search. No Pinecone, no Weaviate, no Qdrant. One

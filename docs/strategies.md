@@ -291,44 +291,63 @@ p := pipeline.New(cfg)
 **When to use:** The standard choice for all ingestion workloads. Schema
 constraints improve type consistency across chunks and documents.
 
-### Custom Extractor Example
+### HybridExtractor (NER + LLM)
 
-To implement a hybrid extractor that combines NER with LLM verification:
+**Package:** `internal/pipeline`
+**File:** `internal/pipeline/hybrid_extractor.go`
+**Strategy flag:** `--extraction-strategy hybrid`
+
+Uses a local NER service (GLiNER, spaCy, or any HTTP NER API) for entity
+extraction, then sends those entities to the LLM for verification and
+relationship extraction. This cuts LLM calls in half per chunk.
+
+```
+LLM strategy:    NER (LLM) -> Verify+Relations (LLM) = 2 calls/chunk
+Hybrid strategy:  NER (local) -> Verify+Relations (LLM) = 1 call/chunk
+```
+
+Per-chunk flow:
+
+1. Call NER service (`POST /ner`) for entity spans (free, fast)
+2. Convert spans to JSON summary with base type hints
+3. Send entities + chunk text to LLM verify+relations pass
+4. If NER service fails, fall back to standard two-pass LLM extraction
 
 ```go
-type HybridExtractor struct {
-    NERModel  ner.Model
+// Via config (automatic)
+cfg.ExtractionStrategy = "hybrid"
+cfg.NERServiceURL = "http://localhost:9000"
+p := pipeline.New(cfg, store, llmClient)
+
+// Or manually
+p.Extractor = pipeline.NewHybridExtractor(p, "http://localhost:9000")
+```
+
+**NER service protocol:** Any HTTP service implementing `POST /ner` with
+`{"text":"..."}` -> `{"entities":[{text, start, end, label}]}`. A ready-to-use
+service is provided in `scripts/ner_service.py` (GLiNER and spaCy backends).
+
+**When to use:** Large corpora where LLM cost is a concern. Standard
+entities (people, organizations, locations) are well-handled by local NER
+models. For domain-specific entities, the default LLM strategy may produce
+better results.
+
+See [Extraction](extraction.md#hybrid-ner--llm-extraction) for full details.
+
+### Custom Extractor Example
+
+To implement a completely custom extractor:
+
+```go
+type MyExtractor struct {
     LLMClient *llm.Client
 }
 
-func (he *HybridExtractor) Extract(chunks []*models.Chunk, workers int) *models.CandidateGraph {
-    graph := &models.CandidateGraph{}
-
-    // Phase 1: Fast NER pass
-    for _, chunk := range chunks {
-        entities := he.NERModel.Extract(chunk.Text)
-        graph.AddEntities(entities)
-    }
-
-    // Phase 2: LLM verification of NER output
-    verified := he.LLMClient.VerifyEntities(graph.Entities)
-    graph.Entities = verified
-
-    // Phase 3: LLM relation extraction between verified entities
-    relations := he.LLMClient.ExtractRelations(chunks, verified)
-    graph.AddEdges(relations)
-
-    return graph
+func (e *MyExtractor) Extract(chunks []*models.Chunk, workers int) *models.CandidateGraph {
+    // Your implementation here
 }
-```
 
-Register it on the pipeline:
-
-```go
-p.Extractor = &HybridExtractor{
-    NERModel:  myNERModel,
-    LLMClient: llmClient,
-}
+p.Extractor = &MyExtractor{LLMClient: llmClient}
 ```
 
 ---
@@ -519,9 +538,12 @@ func (e *MyExtractor) Extract(chunks []*models.Chunk, workers int) *models.Candi
 | Entity-heavy corpus | `recursive` | `TieredResolver` | Catches name variations |
 | Local/offline setup | `recursive` | `default` | No extra API calls |
 
-The `Canonicalizer`, `Extractor`, and `Reranker` defaults are appropriate
-for most workloads. Replace them only when you have domain-specific
-requirements or want to experiment with alternative approaches.
+| Cost-sensitive, large corpus | `recursive` | `default` | Use `--extraction-strategy hybrid` |
+| Domain-specific entities | `recursive` | `TieredResolver` | Use `--extraction-strategy llm` (default) |
+
+The `Canonicalizer` and `Reranker` defaults are appropriate for most
+workloads. For the `Extractor`, choose between `llm` (higher quality,
+2 LLM calls/chunk) and `hybrid` (lower cost, 1 LLM call/chunk).
 
 ---
 
@@ -537,9 +559,11 @@ The default implementations are in the same file. Alternative
 implementations live in their own files:
 
 ```
-internal/chunker/chunker.go          -- defaultChunker (recursive)
-internal/chunker/sentence.go         -- SentenceChunker
-internal/chunker/structural.go       -- StructuralChunker
-internal/chunker/contextual.go       -- ContextualChunker
-internal/pipeline/resolver_tiered.go -- TieredResolver
+internal/chunker/chunker.go              -- defaultChunker (recursive)
+internal/chunker/sentence.go             -- SentenceChunker
+internal/chunker/structural.go           -- StructuralChunker
+internal/chunker/contextual.go           -- ContextualChunker
+internal/pipeline/resolver_tiered.go     -- TieredResolver
+internal/pipeline/hybrid_extractor.go    -- HybridExtractor (NER + LLM)
+internal/ner/client.go                   -- NER HTTP service client
 ```

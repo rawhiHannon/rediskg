@@ -181,15 +181,89 @@ This evidence propagates through the entire pipeline:
 This deep evidence tracking is a key differentiator from systems that
 only track provenance via Document-Chunk links.
 
+## Hybrid NER + LLM Extraction
+
+RedisKG supports a hybrid extraction strategy that uses a local NER model
+(GLiNER, spaCy, or any HTTP NER service) for the first pass instead of
+the LLM, cutting LLM API calls in half per chunk.
+
+```
+LLM strategy (default):   NER (LLM call) -> Verify+Relations (LLM call) = 2 calls/chunk
+Hybrid strategy:           NER (local, free) -> Verify+Relations (LLM call) = 1 call/chunk
+```
+
+### How It Works
+
+1. **Local NER pass** -- The chunk text is sent to a local NER service
+   via HTTP (`POST /ner`). The service returns entity spans with labels
+   (PERSON, ORG, LOC, etc.).
+
+2. **LLM verify + relations** -- The NER spans are formatted as JSON and
+   sent to the LLM alongside the chunk text. The LLM verifies the
+   entities (drops hallucinations, fixes names, adds missed entities)
+   and extracts relationships using the controlled relation vocabulary.
+
+3. **Graceful fallback** -- If the NER service is unreachable or returns
+   no entities, the hybrid extractor falls back to the standard two-pass
+   LLM extraction. No chunk is lost.
+
+### NER Service Protocol
+
+Any HTTP service that implements this protocol works:
+
+```
+POST /ner
+Content-Type: application/json
+
+{"text": "Acme Corp was founded by John Smith in New York."}
+
+Response:
+{"entities": [
+    {"text": "Acme Corp", "start": 0, "end": 9, "label": "ORG"},
+    {"text": "John Smith", "start": 25, "end": 35, "label": "PERSON"},
+    {"text": "New York", "start": 39, "end": 47, "label": "GPE"}
+]}
+```
+
+A ready-to-use NER service is provided in `scripts/ner_service.py`
+supporting GLiNER and spaCy backends.
+
+### Configuration
+
+```bash
+# CLI
+./rediskg --extraction-strategy hybrid --ner-url http://localhost:9000 ingest ./data/
+
+# API
+curl -X POST http://localhost:8081/api/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"text": "...", "extraction_strategy": "hybrid", "ner_service_url": "http://localhost:9000"}'
+```
+
+The web UI also provides a dropdown to switch between strategies per-ingest.
+
+### When to Use Hybrid
+
+| Scenario | Recommended Strategy |
+|----------|---------------------|
+| Small corpus, quality is top priority | `llm` (default) |
+| Large corpus, cost-sensitive | `hybrid` |
+| Domain-specific entities (medical, legal) | `llm` (LLM catches more) |
+| Standard entities (people, orgs, places) | `hybrid` (NER is great here) |
+
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `internal/pipeline/strategies.go` | Extractor interface definition |
 | `internal/pipeline/ingest.go` | extractSchemaConstrained implementation |
+| `internal/pipeline/hybrid_extractor.go` | HybridExtractor (NER + LLM) |
 | `internal/pipeline/coref.go` | Coreference resolution |
+| `internal/ner/client.go` | NER HTTP service client |
+| `internal/llm/extract_schema.go` | LLM extraction + VerifyAndExtractFromNER |
 | `internal/llm/client.go` | LLM API calls |
 | `pkg/models/kg.go` | CandidateEntity, CandidateEdge models |
+| `scripts/ner_service.py` | Ready-to-use GLiNER/spaCy NER service |
 
 ## Next Steps
 

@@ -32,6 +32,8 @@ func main() {
 	flag.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Text chunk size in characters")
 	flag.IntVar(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Overlap between chunks")
 	flag.StringVar(&cfg.ChunkStrategy, "chunk-strategy", cfg.ChunkStrategy, "Chunking strategy: recursive, sentence, structural, contextual")
+	flag.StringVar(&cfg.ExtractionStrategy, "extraction-strategy", cfg.ExtractionStrategy, "Extraction strategy: llm (default), hybrid (local NER + LLM)")
+	flag.StringVar(&cfg.NERServiceURL, "ner-url", cfg.NERServiceURL, "NER service URL for hybrid extraction (default http://localhost:9000)")
 	falkorDBPath := flag.String("falkordb-path", "", "Path to falkordb.so module file")
 
 	flag.Parse()

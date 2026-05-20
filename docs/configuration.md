@@ -34,6 +34,8 @@ cfg := config.DefaultConfig()
 | `ChunkOverlap` | `int` | `150` | `--chunk-overlap` | Character overlap between adjacent chunks |
 | `ChunkStrategy` | `string` | `recursive` | `--chunk-strategy` | Chunking strategy (see below) |
 | `Workers` | `int` | `8` | `--workers` | Concurrent extraction goroutines |
+| `ExtractionStrategy` | `string` | `""` (llm) | `--extraction-strategy` | `llm` (2-pass LLM) or `hybrid` (local NER + LLM) |
+| `NERServiceURL` | `string` | `""` | `--ner-url` | NER service URL for hybrid extraction (default `http://localhost:9000`) |
 | `SemanticWeight` | `float64` | `4.0` | -- | Weight multiplier for LLM-extracted edges |
 | `ProximityMinCount` | `int` | `3` | -- | Minimum co-occurrence count for proximity edges |
 | `PersistSchema` | `bool` | `false` | -- | Save/load schema types between runs |
@@ -65,8 +67,10 @@ rediskg --redis 10.0.0.5:6379 --llm claude --model claude-sonnet-4-20250514 inge
 --workers        Concurrent extraction workers (default: 8)
 --chunk-size     Characters per chunk (default: 1500)
 --chunk-overlap  Overlap between chunks (default: 150)
---chunk-strategy Chunking strategy (default: recursive)
---falkordb-path  Path to falkordb.so module file (setup only)
+--chunk-strategy        Chunking strategy (default: recursive)
+--extraction-strategy   Extraction strategy: llm or hybrid (default: llm)
+--ner-url               NER service URL for hybrid extraction (default: http://localhost:9000)
+--falkordb-path         Path to falkordb.so module file (setup only)
 ```
 
 ### Flag Precedence
@@ -189,6 +193,38 @@ rediskg ingest ./wiki/ \
 
 See [Strategy Reference](strategies.md) for implementation details on each
 chunking strategy.
+
+---
+
+## Extraction Configuration
+
+RedisKG supports two extraction strategies:
+
+| Strategy | Value | LLM Calls/Chunk | Best For |
+|----------|-------|-----------------|----------|
+| LLM (default) | `llm` | 2 | Highest quality, domain-specific entities |
+| Hybrid NER+LLM | `hybrid` | 1 | Cost-sensitive, standard entity types |
+
+### Hybrid Extraction Setup
+
+The hybrid strategy requires a local NER service:
+
+```bash
+# 1. Start the NER service (included in scripts/)
+pip install flask gliner
+python scripts/ner_service.py --port 9000 --backend gliner
+
+# 2. Ingest with hybrid strategy
+rediskg --extraction-strategy hybrid --ner-url http://localhost:9000 ingest ./data/
+```
+
+The NER service URL defaults to `http://localhost:9000` if not specified.
+Any HTTP service that implements the `POST /ner` protocol works -- see
+[Extraction](extraction.md#hybrid-ner--llm-extraction) for the protocol spec.
+
+The web UI includes a dropdown to switch strategies per-ingest without
+restarting the server. The API also accepts `extraction_strategy` and
+`ner_service_url` fields in the ingest request body.
 
 ---
 

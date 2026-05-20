@@ -24,9 +24,11 @@ type Config struct {
 	ChunkStrategy string // "recursive" (default), "sentence", "structural", "contextual"
 
 	// Extraction
-	Workers           int     // concurrent extraction goroutines
-	SemanticWeight    float64 // W1 for LLM-extracted edges
-	ProximityMinCount int     // minimum co-occurrence to keep proximity edge
+	Workers            int     // concurrent extraction goroutines
+	SemanticWeight     float64 // W1 for LLM-extracted edges
+	ProximityMinCount  int     // minimum co-occurrence to keep proximity edge
+	ExtractionStrategy string  // "llm" (default) or "hybrid" (local NER + LLM)
+	NERServiceURL      string  // URL for local NER service (GLiNER/spaCy), used when strategy=hybrid
 
 	// Schema
 	PersistSchema      bool // whether to save/load schema between runs

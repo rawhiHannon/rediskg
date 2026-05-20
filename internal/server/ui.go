@@ -714,6 +714,19 @@ const graphHTML = `<!DOCTYPE html>
 
     <div id="ingest-section">
       <textarea id="ingest-input" placeholder="Paste text to ingest into the graph..."></textarea>
+      <div class="ingest-options" style="display:flex;gap:10px;align-items:center;margin:6px 0;">
+        <label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;">
+          Extraction:
+          <select id="extraction-strategy" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px 8px;font-size:12px;font-family:inherit;">
+            <option value="llm">LLM (2-pass)</option>
+            <option value="hybrid">Hybrid (NER + LLM)</option>
+          </select>
+        </label>
+        <label id="ner-url-label" style="font-size:12px;color:var(--text-secondary);display:none;align-items:center;gap:5px;">
+          NER URL:
+          <input id="ner-url" type="text" value="http://localhost:9000" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px 8px;font-size:12px;font-family:'JetBrains Mono',monospace;width:200px;" />
+        </label>
+      </div>
       <div class="action-bar">
         <button class="btn btn-primary" id="ingest-btn" onclick="ingestText()">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -1111,20 +1124,43 @@ function escapeHtml(str) {
 
 // ======================== OTHER ACTIONS ========================
 
+// Toggle NER URL field visibility based on extraction strategy
+document.getElementById('extraction-strategy').addEventListener('change', function() {
+  document.getElementById('ner-url-label').style.display = this.value === 'hybrid' ? 'flex' : 'none';
+});
+
+// Load server-side settings on startup to sync dropdowns
+fetch('/api/settings').then(r => r.json()).then(s => {
+  if (s.extraction_strategy) {
+    const sel = document.getElementById('extraction-strategy');
+    sel.value = s.extraction_strategy;
+    sel.dispatchEvent(new Event('change'));
+  }
+  if (s.ner_service_url) document.getElementById('ner-url').value = s.ner_service_url;
+}).catch(() => {});
+
 async function ingestText() {
   const input = document.getElementById('ingest-input');
   const btn = document.getElementById('ingest-btn');
   const text = input.value.trim();
   if (!text) return;
 
+  const strategy = document.getElementById('extraction-strategy').value;
+  const nerUrl = document.getElementById('ner-url').value.trim();
+
   btn.disabled = true;
   btn.innerHTML = '<div class="loading-dots"><span></span><span></span><span></span></div> Ingesting...';
 
   try {
+    const body = { text, source: 'web-ui' };
+    if (strategy !== 'llm') {
+      body.extraction_strategy = strategy;
+      if (nerUrl) body.ner_service_url = nerUrl;
+    }
     const res = await fetch('/api/ingest', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, source: 'web-ui' })
+      body: JSON.stringify(body)
     });
     const data = await res.json();
     if (data.error) {
