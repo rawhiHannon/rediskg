@@ -51,6 +51,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/ingest", s.handleIngest)
 	s.mux.HandleFunc("POST /api/query", s.handleQuery)
 	s.mux.HandleFunc("POST /api/cypher", s.handleCypher)
+	s.mux.HandleFunc("POST /api/chat", s.handleChat)
+	s.mux.HandleFunc("PUT /api/document", s.handleUpdateDocument)
+	s.mux.HandleFunc("DELETE /api/document", s.handleDeleteDocument)
+	s.mux.HandleFunc("POST /api/finalize", s.handleFinalize)
 	s.mux.HandleFunc("GET /api/export", s.handleExport)
 	s.mux.HandleFunc("DELETE /api/graph", s.handleDeleteGraph)
 }
@@ -591,6 +595,89 @@ func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	var req pipeline.ChatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Question == "" {
+		writeError(w, http.StatusBadRequest, "provide 'question' in request body")
+		return
+	}
+	result, err := s.pipeline.Chat(req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"answer":   result.Answer,
+		"graph":    result.Graph,
+		"facts":    result.Facts,
+		"entities": result.Entities,
+	})
+}
+
+func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Text   string `json:"text"`
+		Path   string `json:"path"`
+		Source string `json:"source"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	content := req.Text
+	source := req.Source
+	if req.Path != "" {
+		data, err := os.ReadFile(req.Path)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot read path: %v", err))
+			return
+		}
+		content = string(data)
+		if source == "" {
+			source = req.Path
+		}
+	}
+	if content == "" || source == "" {
+		writeError(w, http.StatusBadRequest, "provide 'text'+'source' or 'path' in request body")
+		return
+	}
+
+	if err := s.pipeline.UpdateDocument(content, source); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated", "document": source})
+}
+
+func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DocumentID string `json:"document_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DocumentID == "" {
+		writeError(w, http.StatusBadRequest, "provide 'document_id' in request body")
+		return
+	}
+	if err := s.pipeline.DeleteDocument(req.DocumentID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "document": req.DocumentID})
+}
+
+func (s *Server) handleFinalize(w http.ResponseWriter, r *http.Request) {
+	if err := s.pipeline.Finalize(); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	stats, _ := s.store.GetGraphStats()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "finalized",
+		"nodes":  stats["nodes"],
+		"edges":  stats["edges"],
+	})
+}
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")

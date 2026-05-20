@@ -19,8 +19,9 @@ type Config struct {
 	EmbeddingDimension int
 
 	// Chunking
-	ChunkSize    int
-	ChunkOverlap int
+	ChunkSize     int
+	ChunkOverlap  int
+	ChunkStrategy string // "recursive" (default), "sentence", "structural", "contextual"
 
 	// Extraction
 	Workers           int     // concurrent extraction goroutines

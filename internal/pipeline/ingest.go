@@ -43,6 +43,14 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	chunks := p.Chunker.ChunkDocuments(docs, p.cfg.ChunkSize, p.cfg.ChunkOverlap)
 	log.Printf("  Created %d chunks", len(chunks))
 
+	// Phase 1c: Coreference resolution — replace pronouns with entity names
+	// before extraction so "he", "it", "the company" are resolved to actual
+	// entity names. Uses LLM per-chunk (bounded by Workers).
+	if p.Coref != nil {
+		log.Println("[1c] Resolving coreferences...")
+		chunks = p.Coref.ResolveCoref(chunks)
+	}
+
 	// Phase 1b: Lexical backbone — Document + Chunk + PART_OF + NEXT_CHUNK.
 	// Written upfront so MENTIONED_IN edges (later) can MATCH the Chunk
 	// nodes by id. Tagged separately from entities (:Concept) so it

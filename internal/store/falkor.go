@@ -255,6 +255,77 @@ func (s *FalkorStore) CreateVectorIndex(label, property string, dimension int) e
 	return err
 }
 
+// CreateFulltextIndex creates a fulltext index on a node property for text search.
+// FalkorDB uses RediSearch under the hood; the index is scoped to (label, property).
+func (s *FalkorStore) CreateFulltextIndex(label, property string) error {
+	cypher := fmt.Sprintf(
+		`CREATE FULLTEXT INDEX FOR (n:%s) ON (n.%s)`,
+		label, property,
+	)
+	_, err := s.Query(cypher)
+	return err
+}
+
+// FulltextSearch runs a fulltext query against a (label, property) index.
+// Returns matching node names. The query string supports RediSearch syntax.
+func (s *FalkorStore) FulltextSearch(label, property, query string, k int) ([]string, error) {
+	escaped := escapeFulltextQuery(query)
+	cypher := fmt.Sprintf(
+		`CALL db.idx.fulltext.queryNodes('%s', '%s') YIELD node RETURN node.name LIMIT %d`,
+		label, escaped, k,
+	)
+	result, err := s.ROQuery(cypher)
+	if err != nil {
+		return nil, err
+	}
+	return parseStringResults(result), nil
+}
+
+// FulltextSearchChunks runs a fulltext query on Chunk.text and returns matching chunks.
+func (s *FalkorStore) FulltextSearchChunks(query string, k int) ([]ChunkSimilarity, error) {
+	escaped := escapeFulltextQuery(query)
+	cypher := fmt.Sprintf(
+		`CALL db.idx.fulltext.queryNodes('Chunk', '%s') YIELD node RETURN node.id, node.text, 1.0 AS score LIMIT %d`,
+		escaped, k,
+	)
+	result, err := s.ROQuery(cypher)
+	if err != nil {
+		return nil, err
+	}
+	var out []ChunkSimilarity
+	arr, ok := result.([]interface{})
+	if !ok || len(arr) < 2 {
+		return out, nil
+	}
+	rows, ok := arr[1].([]interface{})
+	if !ok {
+		return out, nil
+	}
+	for _, r := range rows {
+		cols, ok := r.([]interface{})
+		if !ok || len(cols) < 3 {
+			continue
+		}
+		id, _ := cols[0].(string)
+		text, _ := cols[1].(string)
+		score := 1.0
+		if v, ok := cols[2].(float64); ok {
+			score = v
+		}
+		out = append(out, ChunkSimilarity{ID: id, Text: text, Score: score})
+	}
+	return out, nil
+}
+
+// escapeFulltextQuery escapes special RediSearch characters for literal matching.
+func escapeFulltextQuery(q string) string {
+	special := []string{`\`, `'`, `@`, `!`, `{`, `}`, `(`, `)`, `|`, `-`, `=`, `>`, `[`, `]`, `:`, `;`, `~`, `*`}
+	for _, ch := range special {
+		q = strings.ReplaceAll(q, ch, `\`+ch)
+	}
+	return q
+}
+
 // FindSimilarEntities uses vector similarity to find entities close to the given embedding.
 func (s *FalkorStore) FindSimilarEntities(label, property string, embedding []float32, k int) ([]string, error) {
 	vecStr := float32SliceToVecStr(embedding)

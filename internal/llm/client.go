@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"rediskg/pkg/config"
@@ -41,6 +42,101 @@ func (c *Client) Complete(systemPrompt, userPrompt string) (string, error) {
 	default:
 		return c.openaiComplete(systemPrompt, userPrompt)
 	}
+}
+
+// CompleteMessages sends a full message list to the LLM (for multi-turn chat).
+// Falls back to extracting system+user from the list and calling Complete.
+func (c *Client) CompleteMessages(messages []map[string]string) (string, error) {
+	switch c.cfg.LLMProvider {
+	case "openai":
+		return c.openaiCompleteMessages(messages)
+	case "ollama":
+		return c.ollamaCompleteMessages(messages)
+	default:
+		// For providers that don't support message lists natively,
+		// extract system + concatenated user content.
+		system := ""
+		var userParts []string
+		for _, m := range messages {
+			switch m["role"] {
+			case "system":
+				system = m["content"]
+			default:
+				userParts = append(userParts, m["role"]+": "+m["content"])
+			}
+		}
+		return c.Complete(system, strings.Join(userParts, "\n\n"))
+	}
+}
+
+func (c *Client) openaiCompleteMessages(messages []map[string]string) (string, error) {
+	body := map[string]interface{}{
+		"model":       c.cfg.LLMModel,
+		"messages":    messages,
+		"temperature": 0.1,
+		"response_format": map[string]string{
+			"type": "json_object",
+		},
+	}
+	resp, err := c.openaiRequest("https://api.openai.com/v1/chat/completions", body)
+	if err != nil {
+		return "", err
+	}
+	choices, ok := resp["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return "", fmt.Errorf("no choices in response")
+	}
+	msg, ok := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid message format")
+	}
+	content, ok := msg["content"].(string)
+	if !ok {
+		return "", fmt.Errorf("invalid content format")
+	}
+	return content, nil
+}
+
+func (c *Client) ollamaCompleteMessages(messages []map[string]string) (string, error) {
+	url := c.cfg.OllamaURL + "/api/chat"
+	body := map[string]interface{}{
+		"model":    c.cfg.LLMModel,
+		"messages": messages,
+		"stream":   false,
+		"format":   "json",
+		"options": map[string]interface{}{
+			"temperature": 0.1,
+		},
+	}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("ollama request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama error %d: %s", resp.StatusCode, string(respBody))
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", err
+	}
+	msg, ok := result["message"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid ollama response format")
+	}
+	content, ok := msg["content"].(string)
+	if !ok {
+		return "", fmt.Errorf("invalid ollama content format")
+	}
+	return content, nil
 }
 
 // Embed generates an embedding vector for the given text.

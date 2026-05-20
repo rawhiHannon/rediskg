@@ -1,11 +1,13 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 	"sync"
 
+	"rediskg/internal/chunker"
 	"rediskg/internal/llm"
 	"rediskg/internal/schema"
 	"rediskg/internal/store"
@@ -28,6 +30,7 @@ type Pipeline struct {
 	Chunker       Chunker
 	Resolver      Resolver
 	Canonicalizer Canonicalizer
+	Coref         *CorefResolver // nil = disabled; set to enable pronoun resolution
 }
 
 // New creates a new Pipeline with the default strategy implementations.
@@ -37,9 +40,42 @@ func New(cfg *config.Config, store *store.FalkorStore, llmClient *llm.Client) *P
 		store:         store,
 		llmClient:     llmClient,
 		schema:        schema.New(),
-		Chunker:       defaultChunker{},
-		Resolver:      defaultResolver{},
+		Chunker:       selectChunker(cfg, llmClient),
+		Resolver:      NewTieredResolver(llmClient),
 		Canonicalizer: defaultCanonicalizer{},
+		Coref:         &CorefResolver{LLM: llmClient, Workers: cfg.Workers},
+	}
+}
+
+// selectChunker returns the appropriate Chunker based on cfg.ChunkStrategy.
+func selectChunker(cfg *config.Config, llmClient *llm.Client) Chunker {
+	switch cfg.ChunkStrategy {
+	case "sentence":
+		return chunker.SentenceChunker{}
+	case "structural":
+		return chunker.StructuralChunker{}
+	case "contextual":
+		return &chunker.ContextualChunker{
+			Workers: cfg.Workers,
+			ContextFn: func(docText, chunkText string) string {
+				resp, err := llmClient.Complete(
+					`You are a document analyst. Given the full document and a chunk from it, write a short 1-2 sentence context that explains where this chunk fits in the overall document. Be concise. Respond as JSON: {"context": "..."}`,
+					"DOCUMENT:\n"+docText+"\n\nCHUNK:\n"+chunkText,
+				)
+				if err != nil {
+					return ""
+				}
+				var result struct {
+					Context string `json:"context"`
+				}
+				if err := json.Unmarshal([]byte(resp), &result); err != nil {
+					return ""
+				}
+				return result.Context
+			},
+		}
+	default:
+		return defaultChunker{}
 	}
 }
 
@@ -62,6 +98,14 @@ func (p *Pipeline) generateEmbeddings() error {
 	}
 	if err := p.store.CreateVectorIndex("Chunk", "embedding", dim); err != nil {
 		log.Printf("Chunk vector index: %v", err)
+	}
+
+	// --- Fulltext indexes (best-effort) ---
+	if err := p.store.CreateFulltextIndex("Concept", "name"); err != nil {
+		log.Printf("Concept fulltext index: %v", err)
+	}
+	if err := p.store.CreateFulltextIndex("Chunk", "text"); err != nil {
+		log.Printf("Chunk fulltext index: %v", err)
 	}
 
 	// --- Entity name embeddings ---

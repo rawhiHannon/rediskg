@@ -31,6 +31,7 @@ func main() {
 	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "Number of concurrent extraction workers")
 	flag.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Text chunk size in characters")
 	flag.IntVar(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Overlap between chunks")
+	flag.StringVar(&cfg.ChunkStrategy, "chunk-strategy", cfg.ChunkStrategy, "Chunking strategy: recursive, sentence, structural, contextual")
 	falkorDBPath := flag.String("falkordb-path", "", "Path to falkordb.so module file")
 
 	flag.Parse()
@@ -86,6 +87,10 @@ func main() {
 			runQuery(cfg, strings.Join(args[1:], " "))
 		}
 
+	case "chat":
+		requireAPIKey(cfg)
+		runInteractiveChat(cfg)
+
 	case "cypher":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "Usage: rediskg cypher <query>")
@@ -103,6 +108,25 @@ func main() {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 		log.Fatal(srv.Start())
+
+	case "update":
+		requireAPIKey(cfg)
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: rediskg update <path>")
+			os.Exit(1)
+		}
+		runUpdate(cfg, args[1])
+
+	case "delete-doc":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: rediskg delete-doc <document-id>")
+			os.Exit(1)
+		}
+		runDeleteDoc(cfg, args[1])
+
+	case "finalize":
+		requireAPIKey(cfg)
+		runFinalize(cfg)
 
 	case "delete":
 		runDelete(cfg)
@@ -143,7 +167,11 @@ Commands:
   setup              Check and install Redis + FalkorDB dependencies
   serve              Start HTTP server with web UI and REST API
   ingest <path>      Load documents from file/directory and build the graph
+  update <path>      Incrementally update a document (crash-safe)
+  delete-doc <id>    Delete a specific document and its exclusive entities
+  finalize           Run global dedup + embedding refresh after batch changes
   query [question]   Ask a natural language question (interactive mode if no question)
+  chat               Interactive multi-turn chat with conversation history
   cypher <query>     Execute a raw Cypher query
   stats              Show graph statistics
   delete             Delete the entire graph
@@ -226,6 +254,49 @@ func runInteractiveQuery(cfg *config.Config) {
 	}
 }
 
+func runInteractiveChat(cfg *config.Config) {
+	p := createPipeline(cfg)
+	scanner := bufio.NewScanner(os.Stdin)
+	var history []pipeline.ChatMessage
+
+	fmt.Println("Interactive chat mode (multi-turn). Type 'exit' to quit, 'clear' to reset history.")
+	for {
+		fmt.Print("\nYou: ")
+		if !scanner.Scan() {
+			break
+		}
+		question := strings.TrimSpace(scanner.Text())
+		if question == "" {
+			continue
+		}
+		if question == "exit" || question == "quit" {
+			break
+		}
+		if question == "clear" {
+			history = nil
+			fmt.Println("(history cleared)")
+			continue
+		}
+
+		result, err := p.Chat(pipeline.ChatRequest{
+			Question: question,
+			History:  history,
+		})
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			continue
+		}
+
+		fmt.Printf("\nAssistant: %s\n", result.Answer)
+
+		// Append to history for next turn.
+		history = append(history,
+			pipeline.ChatMessage{Role: "user", Content: question},
+			pipeline.ChatMessage{Role: "assistant", Content: result.Answer},
+		)
+	}
+}
+
 func runCypher(cfg *config.Config, cypher string) {
 	p := createPipeline(cfg)
 
@@ -263,6 +334,31 @@ func runDelete(cfg *config.Config) {
 		log.Fatalf("Failed to delete graph: %v", err)
 	}
 	fmt.Printf("Graph '%s' deleted.\n", cfg.GraphName)
+}
+
+func runUpdate(cfg *config.Config, path string) {
+	p := createPipeline(cfg)
+	data := readFile(path)
+	if err := p.UpdateDocument(data, path); err != nil {
+		log.Fatalf("Update failed: %v", err)
+	}
+	fmt.Printf("Document %s updated.\n", path)
+}
+
+func runDeleteDoc(cfg *config.Config, docID string) {
+	p := createPipeline(cfg)
+	if err := p.DeleteDocument(docID); err != nil {
+		log.Fatalf("Delete document failed: %v", err)
+	}
+	fmt.Printf("Document %s deleted.\n", docID)
+}
+
+func runFinalize(cfg *config.Config) {
+	p := createPipeline(cfg)
+	if err := p.Finalize(); err != nil {
+		log.Fatalf("Finalize failed: %v", err)
+	}
+	fmt.Println("Finalize complete.")
 }
 
 func readFile(path string) string {

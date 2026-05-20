@@ -313,8 +313,9 @@ func (p *Pipeline) runMultiPath(question string) (*multiPathResult, error) {
 	factStrings := filterFactsByRelevance(factsScored, 0.25, 12, 3)
 	log.Printf("multi-path [3/9]: %d candidate facts → %d kept", len(factsScored), len(factStrings))
 
-	// 4. Entity discovery — Cypher CONTAINS + entity-vector + merge fact endpoints
+	// 4. Entity discovery — fulltext + Cypher CONTAINS + entity-vector + merge fact endpoints
 	entities := newEntityPool()
+	discoverEntitiesByFulltext(p.store, llmKw, entities)
 	discoverEntitiesByContains(p.store, llmKw, entities)
 	discoverEntitiesByVector(p.store, keywords, qvec, entities)
 	for _, fe := range factEntities {
@@ -335,8 +336,9 @@ func (p *Pipeline) runMultiPath(question string) (*multiPathResult, error) {
 	relStrings := expandRelationships(p.store, top, 20)
 	log.Printf("multi-path [5/9]: %d relationship strings", len(relStrings))
 
-	// 6. Chunk retrieval (3 paths: vector, MENTIONED_IN cosine-ranked, 2-hop)
+	// 6. Chunk retrieval (4 paths: fulltext, vector, MENTIONED_IN cosine-ranked, 2-hop)
 	chunks := newChunkPool()
+	retrieveChunksByFulltext(p.store, question, keywords, chunks, 10)
 	retrieveChunksByVector(p.store, qvec, chunks, 15)
 	retrieveChunksByMentionedIn(p.store, entities.names(15), qvec, chunks, 3)
 	retrieveChunksByTwoHop(p.store, entities.names(10), chunks, 20)
@@ -463,9 +465,28 @@ func searchEdgeFacts(s *store.FalkorStore, relTypes []string, qvec []float32, to
 	return facts, ents
 }
 
+// discoverEntitiesByFulltext uses the RediSearch fulltext index on
+// Concept.name. Faster than CONTAINS for large graphs and supports
+// partial-word matching. Falls back silently if the index doesn't exist yet.
+func discoverEntitiesByFulltext(s *store.FalkorStore, kws []string, pool *entityPool) {
+	for _, kw := range kws {
+		kw = strings.TrimSpace(kw)
+		if kw == "" {
+			continue
+		}
+		names, err := s.FulltextSearch("Concept", "name", kw, 5)
+		if err != nil {
+			// Index may not exist yet — fall through to CONTAINS.
+			return
+		}
+		for _, n := range names {
+			pool.add(n, "", "fulltext")
+		}
+	}
+}
+
 // discoverEntitiesByContains is entity_discovery Path A — Cypher CONTAINS
-// with per-keyword quota. We don't have a fulltext index, so the upstream
-// Path B is replaced by discoverEntitiesByVector below.
+// with per-keyword quota.
 func discoverEntitiesByContains(s *store.FalkorStore, kws []string, pool *entityPool) {
 	seen := map[string]bool{}
 	var batch []string
@@ -639,6 +660,33 @@ func expandRelationships(s *store.FalkorStore, ents []*retrievedEntity, maxRels 
 }
 
 // retrieveChunksByVector is chunk_retrieval Path B — top-k chunks by cosine.
+// retrieveChunksByFulltext uses the RediSearch fulltext index on Chunk.text.
+// Searches using the question and individual keywords. Falls back silently
+// if the index doesn't exist yet.
+func retrieveChunksByFulltext(s *store.FalkorStore, question string, keywords []string, pool *chunkPool, k int) {
+	// Search with the full question first.
+	res, err := s.FulltextSearchChunks(question, k)
+	if err != nil {
+		return // index may not exist
+	}
+	for _, c := range res {
+		pool.add(c.ID, c.Text, "fulltext")
+	}
+	// Then individual keywords for broader coverage.
+	for _, kw := range keywords {
+		if len(pool.order) >= k*2 {
+			break
+		}
+		res, err := s.FulltextSearchChunks(kw, 3)
+		if err != nil {
+			continue
+		}
+		for _, c := range res {
+			pool.add(c.ID, c.Text, "fulltext_kw")
+		}
+	}
+}
+
 func retrieveChunksByVector(s *store.FalkorStore, qvec []float32, pool *chunkPool, k int) {
 	res, err := s.FindSimilarChunks(qvec, k)
 	if err != nil {
