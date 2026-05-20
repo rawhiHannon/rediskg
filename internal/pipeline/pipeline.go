@@ -16,10 +16,10 @@ import (
 
 // Pipeline orchestrates the full knowledge graph extraction process.
 //
-// Three strategy slots are pluggable — set Chunker / Resolver / Canonicalizer
-// to a custom implementation before calling Ingest to A/B test alternative
-// chunking, canonicalisation, or domain post-processing without touching the
-// rest of the pipeline. Default implementations preserve current behaviour.
+// Five strategy slots are pluggable — set Chunker / Resolver / Canonicalizer /
+// Extractor / Reranker to a custom implementation before calling Ingest to A/B
+// test alternative strategies without touching the rest of the pipeline.
+// Default implementations preserve current behaviour.
 type Pipeline struct {
 	cfg       *config.Config
 	store     *store.FalkorStore
@@ -30,12 +30,14 @@ type Pipeline struct {
 	Chunker       Chunker
 	Resolver      Resolver
 	Canonicalizer Canonicalizer
+	Extractor     Extractor
+	Reranker      Reranker
 	Coref         *CorefResolver // nil = disabled; set to enable pronoun resolution
 }
 
 // New creates a new Pipeline with the default strategy implementations.
 func New(cfg *config.Config, store *store.FalkorStore, llmClient *llm.Client) *Pipeline {
-	return &Pipeline{
+	p := &Pipeline{
 		cfg:           cfg,
 		store:         store,
 		llmClient:     llmClient,
@@ -45,6 +47,9 @@ func New(cfg *config.Config, store *store.FalkorStore, llmClient *llm.Client) *P
 		Canonicalizer: defaultCanonicalizer{},
 		Coref:         &CorefResolver{LLM: llmClient, Workers: cfg.Workers},
 	}
+	p.Extractor = defaultExtractor{pipeline: p}
+	p.Reranker = defaultReranker{pipeline: p}
+	return p
 }
 
 // selectChunker returns the appropriate Chunker based on cfg.ChunkStrategy.

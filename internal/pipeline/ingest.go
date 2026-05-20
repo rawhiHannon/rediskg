@@ -59,7 +59,7 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 
 	// Phase 2: Extract candidates (schema-constrained)
 	log.Println("[2/10] Extracting candidates (schema-constrained)...")
-	candidateGraph := p.extractSchemaConstrained(chunks)
+	candidateGraph := p.Extractor.Extract(chunks, p.cfg.Workers)
 	log.Printf("  Extracted %d entity candidates, %d edge candidates",
 		len(candidateGraph.Entities), len(candidateGraph.Edges))
 

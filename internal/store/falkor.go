@@ -19,6 +19,7 @@ type FalkorStore struct {
 	client    *redis.Client
 	graphName string
 	cfg       *config.Config
+	cb        *CircuitBreaker
 }
 
 // New creates a new FalkorStore and verifies the connection.
@@ -48,17 +49,24 @@ func New(cfg *config.Config) (*FalkorStore, error) {
 		client:    client,
 		graphName: cfg.GraphName,
 		cfg:       cfg,
+		cb:        newCircuitBreaker(),
 	}, nil
 }
 
 // Query executes a Cypher query and returns the raw result.
+// Protected by a circuit breaker with exponential backoff.
 func (s *FalkorStore) Query(cypher string) (interface{}, error) {
-	return s.client.Do(ctx, "GRAPH.QUERY", s.graphName, cypher).Result()
+	return s.cb.execute(func() (interface{}, error) {
+		return s.client.Do(ctx, "GRAPH.QUERY", s.graphName, cypher).Result()
+	})
 }
 
 // ROQuery executes a read-only Cypher query.
+// Protected by a circuit breaker with exponential backoff.
 func (s *FalkorStore) ROQuery(cypher string) (interface{}, error) {
-	return s.client.Do(ctx, "GRAPH.RO_QUERY", s.graphName, cypher).Result()
+	return s.cb.execute(func() (interface{}, error) {
+		return s.client.Do(ctx, "GRAPH.RO_QUERY", s.graphName, cypher).Result()
+	})
 }
 
 // CreateEntity creates or merges an entity node in the graph with properties.
