@@ -248,6 +248,9 @@ func toCandidateEntity(e entityJSON, chunkID string) (models.CandidateEntity, bo
 
 // toCandidateEdge converts a parsed relationship into the internal
 // CandidateEdge, normalising the relation ID via the schema alias index.
+// When the raw relation was an *inverse* alias (e.g. the LLM emitted
+// "MANAGED_BY"), the from/to endpoints are swapped so the canonical
+// relation direction is preserved.
 func toCandidateEdge(e edgeJSON, chunkID string, idx int) (models.CandidateEdge, bool) {
 	from := strings.ToLower(strings.TrimSpace(e.FromMention))
 	to := strings.ToLower(strings.TrimSpace(e.ToMention))
@@ -255,9 +258,12 @@ func toCandidateEdge(e edgeJSON, chunkID string, idx int) (models.CandidateEdge,
 	if from == "" || to == "" || rawRelation == "" {
 		return models.CandidateEdge{}, false
 	}
-	relationID, known := schema.ResolveRelation(rawRelation)
+	relationID, known, flip := schema.ResolveRelationWithFlip(rawRelation)
 	if relationID == "" {
 		return models.CandidateEdge{}, false
+	}
+	if flip {
+		from, to = to, from
 	}
 	schemaFit := 0.3
 	if known {

@@ -94,7 +94,7 @@ func addServiceCanonRules(entities []models.CandidateEntity, aliasMap map[string
 			} else if serviceNames[bare+"s"] {
 				target = bare + "s"
 			}
-			if target != "" && resolve(target) != name {
+			if target != "" && resolve(target) != name && aliasIsSafe(name, target) {
 				aliasMap[name] = target
 				added++
 			}
@@ -113,6 +113,38 @@ func canonName(e models.CandidateEntity) string {
 		n = strings.ToLower(strings.TrimSpace(e.Mention))
 	}
 	return n
+}
+
+// aliasIsSafe rejects alias→canonical mappings where one side carries a
+// meaning-changing modifier the other lacks. Catches cases like the LLM
+// proposing "remote nutrition counseling" → "nutrition counseling": the
+// "remote" prefix changes the service's delivery mode, so the two are
+// genuinely different services, not synonyms.
+//
+// Returns true (safe to alias) when both sides agree on every meaning-
+// changing modifier — i.e. either both contain "remote" or neither does,
+// for every modifier in the configured list.
+func aliasIsSafe(alias, canonical string) bool {
+	mods := schema.Canonicalization.MeaningChangingServiceModifiers
+	if len(mods) == 0 {
+		return true
+	}
+	a := " " + strings.ToLower(alias) + " "
+	c := " " + strings.ToLower(canonical) + " "
+	for _, m := range mods {
+		m = strings.ToLower(strings.TrimSpace(m))
+		if m == "" {
+			continue
+		}
+		needle := " " + m + " "
+		// True if the modifier appears as its own token in s.
+		hasA := strings.Contains(a, needle) || strings.HasPrefix(a, needle[1:])
+		hasC := strings.Contains(c, needle) || strings.HasPrefix(c, needle[1:])
+		if hasA != hasC {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

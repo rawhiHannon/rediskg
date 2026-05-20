@@ -61,8 +61,16 @@ type RelationRule struct {
 // by the canonicalization phase in the ingest pipeline. Everything here is
 // data; the engine that applies it lives in the pipeline package.
 type CanonicalizationRules struct {
+	// ServiceModifiers are stripped from service-name prefixes ONLY when
+	// the bare form already exists as an extracted service (safe collapse).
 	ServiceModifiers []string `json:"service_modifiers"`
 	BranchHints      []string `json:"branch_hints"`
+	// MeaningChangingServiceModifiers are prefixes that make a service
+	// genuinely different (e.g. "remote" nutrition counselling is a
+	// delivery-mode variant, not a synonym). When two service mentions
+	// disagree on one of these, we refuse to alias them together — even
+	// if the LLM tried to.
+	MeaningChangingServiceModifiers []string `json:"meaning_changing_service_modifiers"`
 }
 
 // Ontology is the externally-loadable representation. JSON serialisation
@@ -77,8 +85,12 @@ type Ontology struct {
 	} `json:"statuses"`
 	Relations         []RelationFamily        `json:"-"`
 	RelationAliases   map[string]string       `json:"relation_aliases"`
-	RelationRules     map[string]RelationRule `json:"-"`
-	Canonicalization  CanonicalizationRules   `json:"canonicalization"`
+	// RelationInverseAliases map raw LLM relation names whose canonical
+	// target is the inverse direction (e.g. "MANAGED_BY" → "MANAGES")
+	// so the candidate-edge writer must flip endpoints when resolving.
+	RelationInverseAliases map[string]string       `json:"relation_inverse_aliases"`
+	RelationRules          map[string]RelationRule `json:"-"`
+	Canonicalization       CanonicalizationRules   `json:"canonicalization"`
 }
 
 // On-disk JSON shapes (snake_case keys). Decoded then projected onto the
@@ -104,8 +116,9 @@ type ontologyJSON struct {
 			InverseOf   string   `json:"inverse_of,omitempty"`
 		} `json:"items"`
 	} `json:"relations"`
-	RelationAliases map[string]string `json:"relation_aliases"`
-	RelationRules   []struct {
+	RelationAliases        map[string]string `json:"relation_aliases"`
+	RelationInverseAliases map[string]string `json:"relation_inverse_aliases"`
+	RelationRules          []struct {
 		Relation                   string   `json:"relation"`
 		SourceRoles                []string `json:"source_roles,omitempty"`
 		TargetRoles                []string `json:"target_roles,omitempty"`
@@ -142,6 +155,10 @@ var (
 	PredefinedRelations       []RelationFamily
 	RelationIndex             map[string]*RelationDef
 	RelationAliasIndex        map[string]string
+	// RelationInverseAliasIndex maps raw LLM relation names whose canonical
+	// is the inverse direction. Callers must swap (from, to) endpoints when
+	// resolving via this map.
+	RelationInverseAliasIndex map[string]string
 	RelationRules             map[string]RelationRule
 	Canonicalization          CanonicalizationRules
 )
@@ -242,6 +259,10 @@ func applyOntology(raw ontologyJSON) error {
 	if RelationAliasIndex == nil {
 		RelationAliasIndex = map[string]string{}
 	}
+	RelationInverseAliasIndex = raw.RelationInverseAliases
+	if RelationInverseAliasIndex == nil {
+		RelationInverseAliasIndex = map[string]string{}
+	}
 	RelationRules = rules
 	Canonicalization = raw.Canonicalization
 	return nil
@@ -269,17 +290,32 @@ func GetRelationRule(relationID string) *RelationRule {
 
 // ResolveRelation normalises a raw LLM relation name to a canonical ID.
 // "" return + ok=false means explicitly rejected by the alias table.
+// Inverse aliases are resolved here too — callers should use
+// ResolveRelationWithFlip when they need to know whether to swap endpoints.
 func ResolveRelation(raw string) (string, bool) {
+	canonical, ok, _ := ResolveRelationWithFlip(raw)
+	return canonical, ok
+}
+
+// ResolveRelationWithFlip is the full resolver: returns the canonical ID,
+// whether it was a known relation, and whether the caller should swap
+// (from, to) endpoints because the raw name was an inverse alias (e.g.
+// "MANAGED_BY" → ("MANAGES", true, true) means "the canonical is MANAGES
+// but flip the endpoints").
+func ResolveRelationWithFlip(raw string) (canonical string, known bool, flip bool) {
 	if _, ok := RelationIndex[raw]; ok {
-		return raw, true
+		return raw, true, false
 	}
-	if canonical, ok := RelationAliasIndex[raw]; ok {
-		if canonical == "" {
-			return "", false
+	if c, ok := RelationAliasIndex[raw]; ok {
+		if c == "" {
+			return "", false, false
 		}
-		return canonical, true
+		return c, true, false
 	}
-	return raw, false
+	if c, ok := RelationInverseAliasIndex[raw]; ok && c != "" {
+		return c, true, true
+	}
+	return raw, false, false
 }
 
 // GetRelationDef returns the definition for a relation ID, or nil if unknown.

@@ -97,6 +97,7 @@ func (p *Pipeline) Ingest(docs []*models.Document) error {
 	log.Println("[9/14] Rewriting status-aware edges...")
 	preRewrite := len(candidateGraph.Edges)
 	candidateGraph.Edges = rewriteStatusAwareEdges(candidateGraph.Edges, canonicalEntities)
+	candidateGraph.Edges = fixPlannedServiceMisuse(candidateGraph.Edges, canonicalEntities)
 	log.Printf("  Status rewriting: %d -> %d edges", preRewrite, len(candidateGraph.Edges))
 
 	// Phase 9b: Deterministic HAS_BRANCH completion for known networks
@@ -255,7 +256,10 @@ func buildAliasMap(entities []models.CandidateEntity) map[string]string {
 		}
 	}
 
-	// Second pass: map aliases to canonical
+	// Second pass: map aliases to canonical. Each candidate pair is filtered
+	// through `aliasIsSafe` to reject mappings where one side carries a
+	// meaning-changing modifier the other doesn't (e.g. "remote nutrition
+	// counseling" → "nutrition counseling" is a *variant*, not a synonym).
 	for _, e := range entities {
 		canonical := e.CanonicalName
 		if canonical == "" {
@@ -265,14 +269,14 @@ func buildAliasMap(entities []models.CandidateEntity) map[string]string {
 
 		// Map mention to canonical if different
 		mention := strings.ToLower(strings.TrimSpace(e.Mention))
-		if mention != canonical && mention != "" {
+		if mention != canonical && mention != "" && aliasIsSafe(mention, canonical) {
 			aliasMap[mention] = canonical
 		}
 
 		// Map declared aliases
 		for _, alias := range e.Aliases {
 			aliasName := strings.ToLower(strings.TrimSpace(alias.Text))
-			if aliasName != canonical && aliasName != "" {
+			if aliasName != canonical && aliasName != "" && aliasIsSafe(aliasName, canonical) {
 				aliasMap[aliasName] = canonical
 			}
 		}
@@ -440,17 +444,22 @@ func rewriteEdgesToCanonical(edges []models.CandidateEdge, aliasMap map[string]s
 }
 
 // normalizeRelations ensures all edges use canonical relation IDs.
-// Removes edges with rejected/empty relation IDs.
+// Removes edges with rejected/empty relation IDs. Also flips (from, to)
+// for raw relations that came in as inverse aliases (e.g. MANAGED_BY).
+// extract_schema.go already does this at first-resolution time; this is
+// the second-chance path for edges whose RelationID was left empty.
 func normalizeRelations(edges []models.CandidateEdge) []models.CandidateEdge {
 	var result []models.CandidateEdge
 	for _, e := range edges {
 		if e.RelationID == "" {
-			// Try to resolve raw relation
-			resolved, _ := schema.ResolveRelation(e.RelationRaw)
+			resolved, _, flip := schema.ResolveRelationWithFlip(e.RelationRaw)
 			if resolved == "" {
 				continue // rejected
 			}
 			e.RelationID = resolved
+			if flip {
+				e.FromMention, e.ToMention = e.ToMention, e.FromMention
+			}
 		}
 		// Remove self-loops
 		if e.FromMention == e.ToMention {
@@ -775,6 +784,39 @@ func rewriteStatusAwareEdges(edges []models.CandidateEdge, entities map[string]*
 				e.Status = "planned"
 			}
 		}
+	}
+	return edges
+}
+
+// fixPlannedServiceMisuse handles the case where the LLM already emitted
+// PLANNED_SERVICE for a source that turns out to be an ACTIVE entity.
+// rewriteStatusAwareEdges only converts OFFERS→PLANNED_SERVICE when the
+// source is planned; it doesn't repair the reverse mistake. This step
+// converts those mis-labelled edges back to OFFERS and clears any
+// "planned" status that was wrongly attached.
+func fixPlannedServiceMisuse(
+	edges []models.CandidateEdge,
+	entities map[string]*models.CanonicalEntity,
+) []models.CandidateEdge {
+	fixed := 0
+	for i := range edges {
+		e := &edges[i]
+		if e.RelationID != "PLANNED_SERVICE" {
+			continue
+		}
+		fromEnt := entities[e.FromMention]
+		if fromEnt != nil && fromEnt.IsPlanned() {
+			continue // legitimate use
+		}
+		// Source is not planned → the LLM mis-labelled an active service.
+		e.RelationID = "OFFERS"
+		if e.Status == "planned" {
+			e.Status = "active"
+		}
+		fixed++
+	}
+	if fixed > 0 {
+		log.Printf("  Fixed %d mis-labelled PLANNED_SERVICE edges (source not planned) → OFFERS", fixed)
 	}
 	return edges
 }

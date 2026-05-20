@@ -3,8 +3,101 @@ package pipeline
 import (
 	"testing"
 
+	"rediskg/internal/schema"
 	"rediskg/pkg/models"
 )
+
+func TestAliasIsSafe(t *testing.T) {
+	// The default ontology.json ships meaning-changing modifiers.
+	if len(schema.Canonicalization.MeaningChangingServiceModifiers) == 0 {
+		t.Skip("no meaning-changing modifiers configured")
+	}
+	cases := []struct {
+		alias, canonical string
+		want             bool
+		why              string
+	}{
+		// One side has "remote", the other doesn't → reject.
+		{"remote nutrition counseling", "nutrition counseling", false, "remote-only side"},
+		// Both have "remote" → safe.
+		{"remote dietitian counseling", "remote nutrition counseling", true, "remote on both"},
+		// Neither has a modifier → safe.
+		{"qcm", "quickcourier medical", true, "no meaning-changers"},
+		// "Corporate" prefix on one side only → reject.
+		{"corporate blood panels", "blood panels", false, "corporate-only side"},
+		// "Travel" on one side only → reject.
+		{"travel vaccination consultations", "vaccinations", false, "travel-only side"},
+	}
+	for _, c := range cases {
+		if got := aliasIsSafe(c.alias, c.canonical); got != c.want {
+			t.Errorf("aliasIsSafe(%q, %q) = %v (want %v) — %s", c.alias, c.canonical, got, c.want, c.why)
+		}
+	}
+}
+
+func TestFixPlannedServiceMisuse(t *testing.T) {
+	entities := map[string]*models.CanonicalEntity{
+		"cedargate carmel west": {
+			CanonicalName: "cedargate carmel west",
+			Status:        "active",
+		},
+		"cedargate jerusalem south": {
+			CanonicalName:   "cedargate jerusalem south",
+			Status:          "planned",
+			FunctionalRoles: []string{"planned_unit", "branch"},
+		},
+	}
+	in := []models.CandidateEdge{
+		// Mis-labelled: source is ACTIVE but LLM emitted PLANNED_SERVICE.
+		{FromMention: "cedargate carmel west", ToMention: "physiotherapy", RelationID: "PLANNED_SERVICE", Status: "planned"},
+		// Legitimate: source IS planned.
+		{FromMention: "cedargate jerusalem south", ToMention: "dermatology", RelationID: "PLANNED_SERVICE", Status: "planned"},
+		// Unrelated relation → untouched.
+		{FromMention: "cedargate carmel west", ToMention: "physiotherapy", RelationID: "OFFERS", Status: "active"},
+	}
+	out := fixPlannedServiceMisuse(in, entities)
+
+	if out[0].RelationID != "OFFERS" {
+		t.Errorf("active source: expected OFFERS, got %q", out[0].RelationID)
+	}
+	if out[0].Status != "active" {
+		t.Errorf("active source: expected status 'active', got %q", out[0].Status)
+	}
+	if out[1].RelationID != "PLANNED_SERVICE" {
+		t.Errorf("planned source: PLANNED_SERVICE should survive, got %q", out[1].RelationID)
+	}
+	if out[1].Status != "planned" {
+		t.Errorf("planned source: status should stay 'planned', got %q", out[1].Status)
+	}
+	if out[2].RelationID != "OFFERS" {
+		t.Errorf("unrelated edge mutated: %+v", out[2])
+	}
+}
+
+func TestResolveRelationWithFlip(t *testing.T) {
+	// Direct relation: no alias, no flip.
+	if c, ok, flip := schema.ResolveRelationWithFlip("HAS_BRANCH"); c != "HAS_BRANCH" || !ok || flip {
+		t.Errorf("direct: got (%q, %v, %v)", c, ok, flip)
+	}
+	// Forward alias: known, no flip.
+	if c, ok, flip := schema.ResolveRelationWithFlip("OPERATES"); c != "HAS_BRANCH" || !ok || flip {
+		t.Errorf("forward alias OPERATES: got (%q, %v, %v)", c, ok, flip)
+	}
+	// Inverse alias: known, MUST flip.
+	if c, ok, flip := schema.ResolveRelationWithFlip("MANAGED_BY"); c != "MANAGES" || !ok || !flip {
+		t.Errorf("inverse alias MANAGED_BY: got (%q, %v, %v)", c, ok, flip)
+	}
+	if c, ok, flip := schema.ResolveRelationWithFlip("OPERATED_BY"); c != "HAS_BRANCH" || !ok || !flip {
+		t.Errorf("inverse alias OPERATED_BY: got (%q, %v, %v)", c, ok, flip)
+	}
+	if c, ok, flip := schema.ResolveRelationWithFlip("DEPUTY_MANAGER_OF"); c != "HAS_DEPUTY_MANAGER" || !ok || !flip {
+		t.Errorf("inverse alias DEPUTY_MANAGER_OF: got (%q, %v, %v)", c, ok, flip)
+	}
+	// Rejected alias.
+	if c, ok, _ := schema.ResolveRelationWithFlip("RELATED_TO"); c != "" || ok {
+		t.Errorf("rejected alias RELATED_TO: got (%q, %v)", c, ok)
+	}
+}
 
 func svc(name string) models.CandidateEntity {
 	return models.CandidateEntity{

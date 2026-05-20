@@ -137,7 +137,6 @@
   "relation_aliases": {
     "BRANCH_OF": "PART_OF",
     "OPERATES": "HAS_BRANCH",
-    "OPERATED_BY": "HAS_BRANCH",
     "HAS_SITE": "HAS_BRANCH",
     "PLANS_BRANCH": "HAS_PLANNED_BRANCH",
     "SUBSIDIARY_OF": "PART_OF",
@@ -151,14 +150,11 @@
     "WORKS_AT": "BASED_AT",
     "EMPLOYED_BY": "BASED_AT",
     "EMPLOYED_AT": "BASED_AT",
-    "MANAGED_BY": "MANAGES",
     "BRANCH_MANAGER_OF": "MANAGES",
     "HAS_PRACTITIONER": "PROVIDES_SERVICE_FOR",
     "PROVIDES_FOR": "PROVIDES_SERVICE_FOR",
     "SERVES_AT": "PROVIDES_SERVICE_FOR",
     "STAFFED_BY": "PROVIDES_SERVICE_FOR",
-    "DEPUTY_MANAGER_OF": "HAS_DEPUTY_MANAGER",
-    "ACTING_MANAGER_OF": "HAS_DEPUTY_MANAGER",
     "PROVIDES": "OFFERS",
     "HAS_SERVICE": "OFFERS",
     "OFFERS_SERVICE": "OFFERS",
@@ -170,7 +166,7 @@
     "NO_LONGER_AT": "DOES_NOT_WORK_AT",
     "PARTNER_OF": "PARTNERS_WITH",
     "HAS_PARTNERSHIP_WITH": "PARTNERS_WITH",
-    "FULFILLMENT_PARTNER_FOR": "PARTNERS_WITH",
+    "FULFILLMENT_PARTNER_FOR": "FULFILLS_PRESCRIPTIONS_FOR",
     "HAS_CONTRACT_WITH": "CONTRACTED_WITH",
     "FILLS_PRESCRIPTIONS_FOR": "FULFILLS_PRESCRIPTIONS_FOR",
     "RUNS_LAB_TESTS_FOR": "PROCESSES_TESTS_FOR",
@@ -207,13 +203,20 @@
     {"relation": "PROVIDES_REMOTE_SERVICE_FOR", "source_roles": ["staff_member", "service_provider"]},
     {"relation": "HEADQUARTERED_AT", "target_roles": ["headquarters"]},
     {"relation": "OFFERS", "forbidden_source_statuses": ["planned"]},
-    {"relation": "PLANNED_SERVICE", "source_roles": ["planned_unit", "branch", "operated_unit"]},
+    {"relation": "PLANNED_SERVICE", "source_roles": ["planned_unit"], "forbidden_source_statuses": ["active", "inactive", "former", "historical", "completed", "resolved"]},
     {"relation": "TRANSPORTS_SAMPLES_FOR", "source_roles": ["medical_courier", "transport_provider", "logistics_provider"], "forbidden_source_domain_types": ["laboratory", "diagnostics_lab", "lab", "pharmacy", "insurance_services", "imaging_provider"]},
     {"relation": "PROVIDES_PATIENT_TRANSPORT_FOR", "source_roles": ["transport_provider"]},
     {"relation": "PROCESSES_TESTS_FOR", "source_domain_types": ["laboratory", "diagnostics_lab", "lab"], "target_roles": ["branch", "operated_unit"], "forbidden_source_roles": ["branch", "operated_unit"], "can_flip_direction": true}
   ],
+  "relation_inverse_aliases": {
+    "MANAGED_BY": "MANAGES",
+    "OPERATED_BY": "HAS_BRANCH",
+    "DEPUTY_MANAGER_OF": "HAS_DEPUTY_MANAGER",
+    "ACTING_MANAGER_OF": "HAS_DEPUTY_MANAGER"
+  },
   "canonicalization": {
     "service_modifiers": ["basic ", "routine ", "corporate ", "general ", "standard ", "walk-in ", "walk in ", "on-site ", "onsite "],
-    "branch_hints": ["branch", "clinic", "hub", "center", "centre", "care", "site", "office"]
+    "branch_hints": ["branch", "clinic", "hub", "center", "centre", "care", "site", "office"],
+    "meaning_changing_service_modifiers": ["remote", "corporate", "travel", "walk-in", "walk in", "on-site", "onsite", "telehealth", "in-person", "in person", "virtual"]
   }
 }
