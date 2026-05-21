@@ -183,33 +183,64 @@ only track provenance via Document-Chunk links.
 
 ## Hybrid NER + LLM Extraction
 
-RedisKG supports a hybrid extraction strategy that uses a local NER model
-(GLiNER, spaCy, or any HTTP NER service) for the first pass instead of
-the LLM, cutting LLM API calls in half per chunk.
+RedisKG supports a hybrid extraction strategy that uses a built-in Go
+rule-based NER engine for the first pass instead of the LLM, cutting
+LLM API calls in half per chunk. No external services, no Python, no
+model downloads -- just add `--extraction-strategy hybrid` and it works.
 
 ```
 LLM strategy (default):   NER (LLM call) -> Verify+Relations (LLM call) = 2 calls/chunk
-Hybrid strategy:           NER (local, free) -> Verify+Relations (LLM call) = 1 call/chunk
+Hybrid strategy:           NER (built-in, free) -> Verify+Relations (LLM call) = 1 call/chunk
 ```
 
 ### How It Works
 
-1. **Local NER pass** -- The chunk text is sent to a local NER service
-   via HTTP (`POST /ner`). The service returns entity spans with labels
-   (PERSON, ORG, LOC, etc.).
+1. **Built-in NER pass** -- The chunk text is processed by the Go-native
+   rule-based NER engine (`internal/ner/builtin.go`). It detects entities
+   using heuristics: capitalized word sequences, organization suffixes
+   (Corp, Inc, Ltd, GmbH, etc.), person title prefixes (Dr., Prof., Mr.),
+   location context clues, acronym detection, and linking word handling
+   (e.g. "Bank of America"). Returns entity spans with labels (PERSON,
+   ORG, LOC, MISC).
 
 2. **LLM verify + relations** -- The NER spans are formatted as JSON and
    sent to the LLM alongside the chunk text. The LLM verifies the
-   entities (drops hallucinations, fixes names, adds missed entities)
+   entities (drops false positives, fixes names, adds missed entities)
    and extracts relationships using the controlled relation vocabulary.
 
-3. **Graceful fallback** -- If the NER service is unreachable or returns
-   no entities, the hybrid extractor falls back to the standard two-pass
-   LLM extraction. No chunk is lost.
+3. **Graceful fallback** -- If the NER returns no entities for a chunk,
+   the hybrid extractor falls back to the standard two-pass LLM
+   extraction. No chunk is lost.
 
-### NER Service Protocol
+### Built-in NER Heuristics
 
-Any HTTP service that implements this protocol works:
+The built-in NER uses these signal types:
+
+| Signal | Example | Label |
+|--------|---------|-------|
+| Organization suffix | "Acme Corp", "Tesla Inc." | ORG |
+| Person title prefix | "Dr. Jane Smith", "CEO John Doe" | PERSON |
+| 2-3 capitalized words | "John Smith", "Jane Mary Doe" | PERSON |
+| All-caps acronym (2-5 chars) | "NASA", "DARPA" | ORG |
+| Location context | "in New York", "from London" | LOC |
+| Location suffix | "Hudson River", "Central Park" | LOC |
+| Linking words | "University of California" | (preserved as single entity) |
+
+### External NER Service (Optional)
+
+For higher accuracy on specialized domains, you can optionally use an
+external NER service (GLiNER, spaCy, or any HTTP service):
+
+```bash
+# Start the NER service (included in scripts/)
+pip install flask gliner
+python scripts/ner_service.py --port 9000 --backend gliner
+
+# Point RedisKG at it
+./rediskg --extraction-strategy hybrid --ner-url http://localhost:9000 ingest ./data/
+```
+
+Any HTTP service implementing this protocol works:
 
 ```
 POST /ner
@@ -225,16 +256,23 @@ Response:
 ]}
 ```
 
-A ready-to-use NER service is provided in `scripts/ner_service.py`
-supporting GLiNER and spaCy backends.
+When `--ner-url` is not set, the built-in Go NER is used automatically.
 
 ### Configuration
 
 ```bash
-# CLI
+# CLI -- built-in NER (zero setup)
+./rediskg --extraction-strategy hybrid ingest ./data/
+
+# CLI -- external NER service (optional, higher accuracy)
 ./rediskg --extraction-strategy hybrid --ner-url http://localhost:9000 ingest ./data/
 
-# API
+# API -- built-in NER
+curl -X POST http://localhost:8081/api/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"text": "...", "extraction_strategy": "hybrid"}'
+
+# API -- external NER
 curl -X POST http://localhost:8081/api/ingest \
   -H "Content-Type: application/json" \
   -d '{"text": "...", "extraction_strategy": "hybrid", "ner_service_url": "http://localhost:9000"}'
@@ -259,11 +297,12 @@ The web UI also provides a dropdown to switch between strategies per-ingest.
 | `internal/pipeline/ingest.go` | extractSchemaConstrained implementation |
 | `internal/pipeline/hybrid_extractor.go` | HybridExtractor (NER + LLM) |
 | `internal/pipeline/coref.go` | Coreference resolution |
-| `internal/ner/client.go` | NER HTTP service client |
+| `internal/ner/builtin.go` | Built-in Go rule-based NER engine |
+| `internal/ner/client.go` | NER interface + external HTTP service client |
 | `internal/llm/extract_schema.go` | LLM extraction + VerifyAndExtractFromNER |
 | `internal/llm/client.go` | LLM API calls |
 | `pkg/models/kg.go` | CandidateEntity, CandidateEdge models |
-| `scripts/ner_service.py` | Ready-to-use GLiNER/spaCy NER service |
+| `scripts/ner_service.py` | Optional GLiNER/spaCy NER service |
 
 ## Next Steps
 

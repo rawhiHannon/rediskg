@@ -34,8 +34,8 @@ cfg := config.DefaultConfig()
 | `ChunkOverlap` | `int` | `150` | `--chunk-overlap` | Character overlap between adjacent chunks |
 | `ChunkStrategy` | `string` | `recursive` | `--chunk-strategy` | Chunking strategy (see below) |
 | `Workers` | `int` | `8` | `--workers` | Concurrent extraction goroutines |
-| `ExtractionStrategy` | `string` | `""` (llm) | `--extraction-strategy` | `llm` (2-pass LLM) or `hybrid` (local NER + LLM) |
-| `NERServiceURL` | `string` | `""` | `--ner-url` | NER service URL for hybrid extraction (default `http://localhost:9000`) |
+| `ExtractionStrategy` | `string` | `""` (llm) | `--extraction-strategy` | `llm` (2-pass LLM) or `hybrid` (built-in NER + LLM) |
+| `NERServiceURL` | `string` | `""` | `--ner-url` | Optional external NER service URL (if empty, uses built-in Go NER) |
 | `SemanticWeight` | `float64` | `4.0` | -- | Weight multiplier for LLM-extracted edges |
 | `ProximityMinCount` | `int` | `3` | -- | Minimum co-occurrence count for proximity edges |
 | `PersistSchema` | `bool` | `false` | -- | Save/load schema types between runs |
@@ -207,18 +207,24 @@ RedisKG supports two extraction strategies:
 
 ### Hybrid Extraction Setup
 
-The hybrid strategy requires a local NER service:
+The hybrid strategy works out of the box with a built-in Go rule-based
+NER engine -- no external services, no Python, no model downloads:
 
 ```bash
-# 1. Start the NER service (included in scripts/)
+# Just add the flag
+rediskg --extraction-strategy hybrid ingest ./data/
+```
+
+For higher accuracy on specialized domains, you can optionally point to
+an external NER service (GLiNER, spaCy, etc.):
+
+```bash
 pip install flask gliner
 python scripts/ner_service.py --port 9000 --backend gliner
-
-# 2. Ingest with hybrid strategy
 rediskg --extraction-strategy hybrid --ner-url http://localhost:9000 ingest ./data/
 ```
 
-The NER service URL defaults to `http://localhost:9000` if not specified.
+When `--ner-url` is not set, the built-in NER is used automatically.
 Any HTTP service that implements the `POST /ner` protocol works -- see
 [Extraction](extraction.md#hybrid-ner--llm-extraction) for the protocol spec.
 

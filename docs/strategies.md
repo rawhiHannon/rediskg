@@ -297,40 +297,46 @@ constraints improve type consistency across chunks and documents.
 **File:** `internal/pipeline/hybrid_extractor.go`
 **Strategy flag:** `--extraction-strategy hybrid`
 
-Uses a local NER service (GLiNER, spaCy, or any HTTP NER API) for entity
-extraction, then sends those entities to the LLM for verification and
+Uses a built-in Go rule-based NER engine for entity extraction (zero
+setup), then sends those entities to the LLM for verification and
 relationship extraction. This cuts LLM calls in half per chunk.
 
 ```
 LLM strategy:    NER (LLM) -> Verify+Relations (LLM) = 2 calls/chunk
-Hybrid strategy:  NER (local) -> Verify+Relations (LLM) = 1 call/chunk
+Hybrid strategy:  NER (built-in, free) -> Verify+Relations (LLM) = 1 call/chunk
 ```
 
 Per-chunk flow:
 
-1. Call NER service (`POST /ner`) for entity spans (free, fast)
+1. Run built-in NER (capitalization patterns, org suffixes, person titles, etc.)
 2. Convert spans to JSON summary with base type hints
 3. Send entities + chunk text to LLM verify+relations pass
-4. If NER service fails, fall back to standard two-pass LLM extraction
+4. If NER returns no entities, fall back to standard two-pass LLM extraction
 
 ```go
-// Via config (automatic)
+// Via config (automatic — built-in NER, no setup)
+cfg.ExtractionStrategy = "hybrid"
+p := pipeline.New(cfg, store, llmClient)
+
+// Or with an external NER service for higher accuracy
 cfg.ExtractionStrategy = "hybrid"
 cfg.NERServiceURL = "http://localhost:9000"
 p := pipeline.New(cfg, store, llmClient)
 
 // Or manually
-p.Extractor = pipeline.NewHybridExtractor(p, "http://localhost:9000")
+p.Extractor = pipeline.NewHybridExtractor(p, "") // built-in NER
+p.Extractor = pipeline.NewHybridExtractor(p, "http://localhost:9000") // external
 ```
 
-**NER service protocol:** Any HTTP service implementing `POST /ner` with
-`{"text":"..."}` -> `{"entities":[{text, start, end, label}]}`. A ready-to-use
-service is provided in `scripts/ner_service.py` (GLiNER and spaCy backends).
+**Optional external NER:** For higher accuracy, you can point to an HTTP
+service implementing `POST /ner` with `{"text":"..."}` ->
+`{"entities":[{text, start, end, label}]}`. A ready-to-use service is
+provided in `scripts/ner_service.py` (GLiNER and spaCy backends).
 
 **When to use:** Large corpora where LLM cost is a concern. Standard
-entities (people, organizations, locations) are well-handled by local NER
-models. For domain-specific entities, the default LLM strategy may produce
-better results.
+entities (people, organizations, locations) are well-handled by the
+built-in NER. For domain-specific entities, the default LLM strategy
+may produce better results.
 
 See [Extraction](extraction.md#hybrid-ner--llm-extraction) for full details.
 
@@ -565,5 +571,6 @@ internal/chunker/structural.go           -- StructuralChunker
 internal/chunker/contextual.go           -- ContextualChunker
 internal/pipeline/resolver_tiered.go     -- TieredResolver
 internal/pipeline/hybrid_extractor.go    -- HybridExtractor (NER + LLM)
-internal/ner/client.go                   -- NER HTTP service client
+internal/ner/builtin.go                  -- Built-in Go rule-based NER engine
+internal/ner/client.go                   -- NER interface + external HTTP client
 ```

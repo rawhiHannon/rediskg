@@ -133,8 +133,8 @@ Ingest text or a file into the knowledge graph.
 | `text` | string | one of `text` or `path` | Raw text content to ingest |
 | `source` | string | no | Source label for the document |
 | `path` | string | one of `text` or `path` | Server-local file or directory path |
-| `extraction_strategy` | string | no | `"llm"` (default) or `"hybrid"` (local NER + LLM) |
-| `ner_service_url` | string | no | NER service URL when using hybrid strategy |
+| `extraction_strategy` | string | no | `"llm"` (default) or `"hybrid"` (built-in NER + LLM) |
+| `ner_service_url` | string | no | Optional external NER service URL (uses built-in Go NER if empty) |
 
 ```json
 {"text": "Acme Corp was founded in 1985 by Jane Doe.", "source": "acme-overview"}

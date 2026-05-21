@@ -719,12 +719,12 @@ const graphHTML = `<!DOCTYPE html>
           Extraction:
           <select id="extraction-strategy" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px 8px;font-size:12px;font-family:inherit;">
             <option value="llm">LLM (2-pass)</option>
-            <option value="hybrid">Hybrid (NER + LLM)</option>
+            <option value="hybrid">Hybrid (NER + LLM, half cost)</option>
           </select>
         </label>
         <label id="ner-url-label" style="font-size:12px;color:var(--text-secondary);display:none;align-items:center;gap:5px;">
-          NER URL:
-          <input id="ner-url" type="text" value="http://localhost:9000" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px 8px;font-size:12px;font-family:'JetBrains Mono',monospace;width:200px;" />
+          External NER (optional):
+          <input id="ner-url" type="text" value="" placeholder="Built-in (default)" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px 8px;font-size:12px;font-family:'JetBrains Mono',monospace;width:200px;" />
         </label>
       </div>
       <div class="action-bar">

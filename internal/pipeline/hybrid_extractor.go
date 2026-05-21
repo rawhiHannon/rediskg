@@ -11,26 +11,37 @@ import (
 	"rediskg/pkg/models"
 )
 
-// HybridExtractor uses a local NER service for fast entity extraction (no LLM
-// cost), then sends those entities + chunk text to the LLM for verification
-// and relationship extraction. This cuts LLM calls in half compared to the
+// HybridExtractor uses NER for fast entity extraction (no LLM cost), then
+// sends those entities + chunk text to the LLM for verification and
+// relationship extraction. This cuts LLM calls in half compared to the
 // default two-pass LLM approach.
+//
+// By default it uses the built-in Go rule-based NER (zero setup). If an
+// external NER service URL is configured, it uses that instead.
 //
 // Flow per chunk:
 //
-//	NER service (free, local) → entity spans
+//	NER (built-in or external) → entity spans
 //	         ↓
 //	LLM pass (verify entities + extract relations) → verified entities + edges
 type HybridExtractor struct {
-	pipeline  *Pipeline
-	nerClient *ner.Client
+	pipeline     *Pipeline
+	nerExtractor ner.Extractor
 }
 
-// NewHybridExtractor creates a hybrid extractor backed by the given NER service.
+// NewHybridExtractor creates a hybrid extractor. If nerURL is non-empty, it
+// uses the external HTTP NER service; otherwise it uses the built-in
+// Go rule-based NER engine (no setup required).
 func NewHybridExtractor(p *Pipeline, nerURL string) *HybridExtractor {
+	var ext ner.Extractor
+	if nerURL != "" {
+		ext = ner.NewClient(nerURL)
+	} else {
+		ext = ner.NewBuiltinExtractor()
+	}
 	return &HybridExtractor{
-		pipeline:  p,
-		nerClient: ner.NewClient(nerURL),
+		pipeline:     p,
+		nerExtractor: ext,
 	}
 }
 
@@ -74,7 +85,7 @@ func (he *HybridExtractor) Extract(chunks []*models.Chunk, workers int) *models.
 // extractChunk runs the two-phase hybrid extraction for a single chunk.
 func (he *HybridExtractor) extractChunk(c *models.Chunk) ([]models.CandidateEntity, []models.CandidateEdge) {
 	// Phase 1: Local NER (free, fast)
-	spans, err := he.nerClient.Extract(c.Text)
+	spans, err := he.nerExtractor.Extract(c.Text)
 	if err != nil {
 		log.Printf("Warning: NER service failed for chunk %s, falling back to LLM: %v", c.ID, err)
 		return he.fallbackLLM(c)

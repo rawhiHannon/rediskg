@@ -8,7 +8,7 @@ A Go microservice and CLI for building production-quality knowledge graphs from 
 - **Multi-path retrieval** with 6 retrieval signals: fulltext, vector, edge-fact vector, MENTIONED_IN traversal, 2-hop expansion
 - **Dynamic schema governance** -- three-layer trust model (base types, candidate types, accepted types) with LLM-assisted approval
 - **5 pluggable strategy interfaces** -- Chunker, Resolver, Canonicalizer, Extractor, Reranker
-- **2 extraction strategies** -- LLM-only (2-pass, highest quality) or Hybrid NER+LLM (local GLiNER/spaCy + LLM, 50% fewer API calls)
+- **2 extraction strategies** -- LLM-only (2-pass, highest quality) or Hybrid NER+LLM (built-in Go NER + LLM, 50% fewer API calls, zero setup)
 - **4 chunking strategies** -- recursive character, sentence-boundary, structural/heading, contextual (LLM-prefixed)
 - **3-tier entity resolution** -- exact match, semantic cosine similarity, LLM verification with Union-Find clustering
 - **Typed relationship edges** -- native Cypher pattern matching (`MATCH (a)-[:MANAGES]->(b)`) with per-relation-type vector indexes
@@ -55,18 +55,22 @@ export OPENAI_API_KEY=sk-...
 ./rediskg --llm claude --claude-key sk-ant-... --chunk-strategy sentence ingest ./data/
 ```
 
-### Hybrid NER Extraction (optional, saves ~50% LLM costs)
+### Hybrid NER Extraction (saves ~50% LLM costs)
 
 ```bash
-# 1. Start the NER service (GLiNER or spaCy)
-pip install flask gliner
-python scripts/ner_service.py --port 9000 --backend gliner
-
-# 2. Ingest with hybrid strategy
-./rediskg --extraction-strategy hybrid --ner-url http://localhost:9000 ingest ./data/
+# Just add the flag — built-in NER works out of the box, no setup needed
+./rediskg --extraction-strategy hybrid ingest ./data/
 ```
 
-The hybrid strategy uses a local NER model for entity extraction (free, fast), then sends only the verification + relationship extraction to the LLM. The web UI also has a dropdown to switch strategies per-ingest.
+The hybrid strategy uses a built-in Go rule-based NER engine for entity extraction (free, instant), then sends only the verification + relationship extraction to the LLM. No external services, no Python, no model downloads. The web UI also has a dropdown to switch strategies per-ingest.
+
+For higher NER accuracy, you can optionally point to an external NER service (GLiNER, spaCy, etc.):
+
+```bash
+pip install flask gliner
+python scripts/ner_service.py --port 9000 --backend gliner
+./rediskg --extraction-strategy hybrid --ner-url http://localhost:9000 ingest ./data/
+```
 
 ### Query
 

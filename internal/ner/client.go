@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// Extractor is the interface for any NER backend (built-in or external).
+type Extractor interface {
+	Extract(text string) ([]Span, error)
+}
+
 // Span represents a single named-entity span returned by a NER service.
 type Span struct {
 	Text  string `json:"text"`

@@ -61,9 +61,6 @@ func New(cfg *config.Config, store *store.FalkorStore, llmClient *llm.Client) *P
 func (p *Pipeline) SetExtractor(strategy, nerURL string) {
 	switch strategy {
 	case "hybrid":
-		if nerURL == "" {
-			nerURL = "http://localhost:9000"
-		}
 		p.Extractor = NewHybridExtractor(p, nerURL)
 	default:
 		p.Extractor = defaultExtractor{pipeline: p}
@@ -134,10 +131,11 @@ func selectExtractor(cfg *config.Config, p *Pipeline) Extractor {
 	switch cfg.ExtractionStrategy {
 	case "hybrid":
 		url := cfg.NERServiceURL
-		if url == "" {
-			url = "http://localhost:9000"
+		if url != "" {
+			log.Printf("Using hybrid extraction (external NER: %s)", url)
+		} else {
+			log.Printf("Using hybrid extraction (built-in NER)")
 		}
-		log.Printf("Using hybrid extraction (NER service: %s)", url)
 		return NewHybridExtractor(p, url)
 	default:
 		return defaultExtractor{pipeline: p}
