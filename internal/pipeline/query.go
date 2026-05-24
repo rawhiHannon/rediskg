@@ -75,6 +75,16 @@ func detectLookupName(q string) []string {
 	return nil
 }
 
+// sanitizeContext escapes closing XML tags in retrieved content to prevent
+// prompt injection. If ingested text contains "</context>", it could break
+// out of the context block and inject instructions into the LLM prompt.
+func sanitizeContext(s string) string {
+	s = strings.ReplaceAll(s, "</context>", "&lt;/context&gt;")
+	s = strings.ReplaceAll(s, "</Context>", "&lt;/Context&gt;")
+	s = strings.ReplaceAll(s, "</CONTEXT>", "&lt;/CONTEXT&gt;")
+	return s
+}
+
 // answerPrompt explicitly asks for JSON because the shared LLM client is
 // configured with response_format=json_object, which OpenAI only accepts when
 // the prompt itself contains the word "json".
@@ -163,7 +173,7 @@ func (p *Pipeline) Query(question string, withHumanAnswer bool) (*models.QueryRe
 	if strings.TrimSpace(context) == "" {
 		context = "(no supporting evidence)"
 	}
-	userPrompt := fmt.Sprintf("Question: %s\n\nKnowledge graph context:\n%s", question, context)
+	userPrompt := fmt.Sprintf("Question: %s\n\nKnowledge graph context:\n<context>\n%s\n</context>", question, sanitizeContext(context))
 
 	answer, err := p.llmClient.Complete(answerPrompt, userPrompt)
 	if err != nil {

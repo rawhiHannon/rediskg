@@ -170,7 +170,7 @@ func buildChatMessages(systemPrompt string, history []ChatMessage, question, con
 	}
 
 	// Current question with context.
-	userMsg := fmt.Sprintf("Question: %s\n\nKnowledge graph context:\n<context>\n%s\n</context>", question, context)
+	userMsg := fmt.Sprintf("Question: %s\n\nKnowledge graph context:\n<context>\n%s\n</context>", question, sanitizeContext(context))
 	messages = append(messages, map[string]string{"role": "user", "content": userMsg})
 
 	return messages
